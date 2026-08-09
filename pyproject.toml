@@ -1,13 +1,15 @@
 [project]
 name = "gloo-api"
 version = "0.1.0"
-description = "Add your description here"
+description = "An API for the Gloo CRM platform"
 readme = "README.md"
 authors = [
     { name = "kMlad", email = "kmlad@kmlad.dev" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi[standard]>=0.141.1",
+]
 
 [project.scripts]
 gloo-api = "gloo_api:main"
