@@ -9,11 +9,16 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "supabase>=2.31.0",
 ]
-
-[project.scripts]
-gloo-api = "gloo_api:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "app"
+module-root = ""
+
+[tool.fastapi]
+entrypoint = "app.main:app"
