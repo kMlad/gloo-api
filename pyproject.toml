@@ -9,7 +9,15 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.15.0",
     "supabase>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]
