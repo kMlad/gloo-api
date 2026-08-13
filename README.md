@@ -9,7 +9,11 @@ Copy `.env.example` to `.env.local` and provide:
 
 - `SUPABASE_URL` and a backend-only `SUPABASE_SECRET_KEY`
 - `SMARTLEAD_API_KEY`
+- `LEADMAGIC_API_KEY`, `PROSPEO_API_KEY`, `AIRSCALE_API_KEY`, and
+  `FULLENRICH_API_KEY`
 - a long random `INTERNAL_API_TOKEN`
+- the externally reachable `PUBLIC_API_BASE_URL` and a separate long random
+  `FULLENRICH_WEBHOOK_TOKEN`
 
 Never expose the Supabase secret key or internal token in a browser client.
 
@@ -56,4 +60,25 @@ List imported leads with `GET /api/v1/leads`; retrieve complete canonical,
 campaign-specific, custom-property, and reply data with
 `GET /api/v1/leads/{lead_id}`.
 
-V1 does not parse signature phone numbers or call enrichment providers.
+## Phone enrichment
+
+Enrich selected leads:
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/phone-enrichments \
+  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  -H "Idempotency-Key: phone-run-2026-08-12-01" \
+  -H "Content-Type: application/json" \
+  -d '{"lead_ids": ["00000000-0000-0000-0000-000000000000"]}'
+```
+
+Omit `lead_ids` to enrich the newest eligible leads; `limit` defaults to 25
+and is capped at 100. The service checks inbound reply signatures first, then
+LeadMagic, Prospeo, AirScale, and FullEnrich, stopping at the first valid E.164
+number. FullEnrich runs may remain in `waiting` until its authenticated webhook
+arrives. Inspect a run with `GET /api/v1/phone-enrichments/{run_id}` or use
+`POST /api/v1/phone-enrichments/{run_id}/reconcile` after five minutes if a
+callback needs reconciliation.
+
+Provider requests, responses, statuses, and safe errors are retained with each
+run. API keys and authorization headers are never written to audit records.

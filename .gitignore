@@ -12,3 +12,9 @@ wheels/
 # Environment variables
 .env.local
 .env.*.local
+
+#Exports
+outputs
+
+#File systems
+.DS_Store

@@ -6,6 +6,18 @@ from fastapi import Depends, FastAPI
 from supabase import AsyncClient, acreate_client
 
 from app.env import get_env
+from app.phone_enrichment.providers import (
+    AirScaleClient,
+    FullEnrichClient,
+    LeadMagicClient,
+    ProspeoClient,
+)
+from app.phone_enrichment.repository import EnrichmentRepository
+from app.phone_enrichment.routes import (
+    internal_router as phone_enrichment_router,
+    webhook_router as phone_enrichment_webhook_router,
+)
+from app.phone_enrichment.service import PhoneEnrichmentService
 from app.repositories import Repository
 from app.routes.leads import router as leads_router
 from app.routes.smartlead import router as smartlead_router
@@ -25,6 +37,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=httpx.Timeout(env.smartlead_timeout_seconds),
         headers={"Accept": "application/json"},
     )
+    provider_timeout = httpx.Timeout(
+        connect=5.0,
+        read=env.phone_provider_timeout_seconds,
+        write=10.0,
+        pool=5.0,
+    )
+    leadmagic_http = httpx.AsyncClient(
+        base_url=env.leadmagic_base_url.rstrip("/") + "/",
+        timeout=provider_timeout,
+        headers={"Accept": "application/json"},
+    )
+    prospeo_http = httpx.AsyncClient(
+        base_url=env.prospeo_base_url.rstrip("/") + "/",
+        timeout=provider_timeout,
+        headers={"Accept": "application/json"},
+    )
+    airscale_http = httpx.AsyncClient(
+        base_url=env.airscale_base_url.rstrip("/") + "/",
+        timeout=provider_timeout,
+        headers={"Accept": "application/json"},
+    )
+    fullenrich_http = httpx.AsyncClient(
+        base_url=env.fullenrich_base_url.rstrip("/") + "/",
+        timeout=provider_timeout,
+        headers={"Accept": "application/json"},
+    )
     app.state.supabase = supabase
     app.state.repository = Repository(supabase)
     app.state.smartlead = SmartLeadClient(
@@ -32,10 +70,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         env.smartlead_api_key.get_secret_value(),
         max_retries=env.smartlead_max_retries,
     )
+    enrichment_repository = EnrichmentRepository(supabase)
+    provider_options = {
+        "max_retries": env.phone_provider_max_retries,
+        "concurrency": env.phone_enrichment_concurrency,
+    }
+    app.state.phone_enrichment = PhoneEnrichmentService(
+        enrichment_repository,
+        LeadMagicClient(
+            leadmagic_http,
+            env.leadmagic_api_key.get_secret_value(),
+            **provider_options,
+        ),
+        ProspeoClient(
+            prospeo_http,
+            env.prospeo_api_key.get_secret_value(),
+            **provider_options,
+        ),
+        AirScaleClient(
+            airscale_http,
+            env.airscale_api_key.get_secret_value(),
+            **provider_options,
+        ),
+        FullEnrichClient(
+            fullenrich_http,
+            env.fullenrich_api_key.get_secret_value(),
+            **provider_options,
+        ),
+        public_api_base_url=env.public_api_base_url,
+        fullenrich_webhook_token=env.fullenrich_webhook_token.get_secret_value(),
+        concurrency=env.phone_enrichment_concurrency,
+        reconcile_seconds=env.phone_enrichment_reconcile_seconds,
+    )
     try:
         yield
     finally:
         await smartlead_http.aclose()
+        await leadmagic_http.aclose()
+        await prospeo_http.aclose()
+        await airscale_http.aclose()
+        await fullenrich_http.aclose()
         if supabase._postgrest is not None:
             await supabase._postgrest.aclose()
         await supabase.auth.close()
@@ -45,6 +119,8 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     application = FastAPI(lifespan=lifespan if use_lifespan else None)
     application.include_router(smartlead_router)
     application.include_router(leads_router)
+    application.include_router(phone_enrichment_router)
+    application.include_router(phone_enrichment_webhook_router)
     return application
 
 
