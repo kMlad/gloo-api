@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models import CampaignCreate, CampaignUpdate
+from app.models import CampaignCreate, CampaignUpdate, InviteUserRequest
 
 
 def test_campaign_reply_type_defaults_and_valid_combinations() -> None:
@@ -34,3 +34,13 @@ def test_campaign_update_requires_a_field_and_validates_reply_types() -> None:
         CampaignUpdate()
     with pytest.raises(ValidationError):
         CampaignUpdate(reply_types=[])
+
+
+def test_invite_user_request_requires_email_and_known_role() -> None:
+    assert InviteUserRequest(email="person@example.com", role="sdr").role == "sdr"
+    with pytest.raises(ValidationError):
+        InviteUserRequest(email="not-an-email", role="sdr")
+    with pytest.raises(ValidationError):
+        InviteUserRequest(email="person@example.com", role="manager")
+    with pytest.raises(ValidationError):
+        InviteUserRequest(email="person@example.com")

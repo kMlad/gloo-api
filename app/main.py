@@ -1,11 +1,12 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from supabase import AsyncClient, acreate_client
 
-from app.env import get_env
+from app.env import get_env, load_cors_allowed_origins
 from app.phone_enrichment.providers import (
     AirScaleClient,
     FullEnrichClient,
@@ -21,6 +22,7 @@ from app.phone_enrichment.service import PhoneEnrichmentService
 from app.repositories import Repository
 from app.routes.leads import router as leads_router
 from app.routes.smartlead import router as smartlead_router
+from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
 
@@ -115,12 +117,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await supabase.auth.close()
 
 
-def create_app(*, use_lifespan: bool = True) -> FastAPI:
+def create_app(
+    *,
+    use_lifespan: bool = True,
+    cors_allowed_origins: Sequence[str] | None = None,
+) -> FastAPI:
     application = FastAPI(lifespan=lifespan if use_lifespan else None)
+    origins = (
+        list[str](cors_allowed_origins)
+        if cors_allowed_origins is not None
+        else load_cors_allowed_origins()
+    )
+    if origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     application.include_router(smartlead_router)
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)
     application.include_router(phone_enrichment_webhook_router)
+    application.include_router(users_router)
     return application
 
 

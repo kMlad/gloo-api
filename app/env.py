@@ -1,7 +1,25 @@
+from collections.abc import Sequence
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BeforeValidator, Field, SecretStr, ValidationError
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings.exceptions import SettingsError
+
+
+def _parse_cors_allowed_origins(value: object) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise TypeError("cors_allowed_origins must be a list or comma-separated string")
+
+
+CorsAllowedOrigins = Annotated[
+    list[str], NoDecode, BeforeValidator(_parse_cors_allowed_origins)
+]
 
 
 class Env(BaseSettings):
@@ -21,6 +39,8 @@ class Env(BaseSettings):
     internal_api_token: SecretStr = Field(min_length=32)
     public_api_base_url: str
     fullenrich_webhook_token: SecretStr = Field(min_length=32)
+    cors_allowed_origins: CorsAllowedOrigins = Field(default_factory=list)
+    invite_redirect_url: str | None = None
     smartlead_base_url: str = "https://server.smartlead.ai/api/v1"
     smartlead_timeout_seconds: float = Field(default=30.0, gt=0)
     smartlead_max_retries: int = Field(default=3, ge=0, le=10)
@@ -38,3 +58,10 @@ class Env(BaseSettings):
 @lru_cache
 def get_env() -> Env:
     return Env()
+
+
+def load_cors_allowed_origins() -> list[str]:
+    try:
+        return get_env().cors_allowed_origins
+    except (ValidationError, SettingsError):
+        return []

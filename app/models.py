@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 PhoneSource = Literal[
     "smartlead_signature",
@@ -12,6 +12,7 @@ PhoneSource = Literal[
     "fullenrich",
 ]
 ReplyType = Literal["positive", "ooo"]
+AppRole = Literal["admin", "sales_lead", "sdr"]
 
 
 def _validate_reply_types(reply_types: list[ReplyType]) -> None:
@@ -126,3 +127,15 @@ class LeadListResponse(BaseModel):
 class LeadDetailResponse(BaseModel):
     lead: dict[str, Any]
     conversations: list[dict[str, Any]]
+
+
+class InviteUserRequest(BaseModel):
+    email: EmailStr
+    role: AppRole
+
+
+class InviteUserResponse(BaseModel):
+    id: UUID
+    email: str
+    role: AppRole
+    invited_at: datetime

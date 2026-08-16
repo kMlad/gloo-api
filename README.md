@@ -14,8 +14,13 @@ Copy `.env.example` to `.env.local` and provide:
 - a long random `INTERNAL_API_TOKEN`
 - the externally reachable `PUBLIC_API_BASE_URL` and a separate long random
   `FULLENRICH_WEBHOOK_TOKEN`
+- optionally `INVITE_REDIRECT_URL` (must be in the Auth redirect allow-list)
 
 Never expose the Supabase secret key or internal token in a browser client.
+
+Local Auth is invite-only (`enable_signup = false` in `supabase/config.toml`).
+On a hosted project, disable public signup the same way: Dashboard → Auth →
+Providers → Email. Admin invites still create users when signup is disabled.
 
 ## Local setup
 
@@ -30,6 +35,12 @@ All integration and lead endpoints require:
 
 ```text
 Authorization: Bearer <INTERNAL_API_TOKEN>
+```
+
+User invite endpoints instead require a Supabase user access token:
+
+```text
+Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
 ```
 
 ## Workflow
@@ -87,3 +98,20 @@ callback needs reconciliation.
 
 Provider requests, responses, statuses, and safe errors are retained with each
 run. API keys and authorization headers are never written to audit records.
+
+## User invites
+
+Admins and sales leads invite teammates with a user JWT (not the internal token).
+Roles are stored in Auth `app_metadata.role`. Admins may invite `admin`,
+`sales_lead`, and `sdr`. Sales leads may invite `sdr` only.
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/users/invites \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "teammate@example.com", "role": "sdr"}'
+```
+
+Local invite emails are captured by Inbucket at `http://127.0.0.1:54324`. Hosted
+projects need SMTP configured. After the invite email, the user sets a password
+via Supabase's invite confirmation flow.
