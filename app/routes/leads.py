@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import require_internal_token
 from app.dependencies import get_repository
-from app.models import LeadDetailResponse, LeadListResponse
+from app.models import LeadDetailResponse, LeadListResponse, ReplyType
 from app.repositories import Repository
 
 router = APIRouter(
@@ -22,8 +22,11 @@ async def list_leads(
     repository: RepositoryDependency,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    reply_type: ReplyType | None = Query(default=None),
 ) -> dict:
-    items, total = await repository.list_leads(limit=limit, offset=offset)
+    items, total = await repository.list_leads(
+        limit=limit, offset=offset, reply_type=reply_type
+    )
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 

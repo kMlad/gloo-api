@@ -44,3 +44,17 @@ def test_phone_enrichment_migration_is_private_and_idempotent() -> None:
         )
     assert "idempotency_key text not null unique" in migration
     assert "phone_enrichment_items_one_active_per_lead_idx" in migration
+
+
+def test_campaign_reply_types_migration_is_additive_and_constrained() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_campaign_reply_types.sql")
+    ).read_text()
+
+    assert "add column reply_types text[] not null default" in migration
+    assert "cardinality(reply_types) > 0" in migration
+    assert "array['positive', 'ooo']::text[]" in migration
+    assert "add column reply_type text default 'positive'" in migration
+    assert "reply_type is null or reply_type in ('positive', 'ooo')" in migration
+    assert "smartlead_conversations_reply_type_lead_id_idx" in migration
+    assert "drop column positive_category" not in migration

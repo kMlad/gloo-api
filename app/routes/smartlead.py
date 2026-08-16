@@ -45,7 +45,7 @@ async def add_campaign(
 ) -> dict:
     try:
         return await CampaignService(repository, smartlead).add(
-            payload.smartlead_campaign_id, payload.enabled
+            payload.smartlead_campaign_id, payload.enabled, payload.reply_types
         )
     except SmartLeadError as exc:
         upstream_status = (
@@ -64,8 +64,10 @@ async def update_campaign(
     payload: CampaignUpdate,
     repository: RepositoryDependency,
 ) -> dict:
-    campaign = await CampaignService(repository).set_enabled(
-        smartlead_campaign_id, payload.enabled
+    campaign = await CampaignService(repository).update(
+        smartlead_campaign_id,
+        enabled=payload.enabled,
+        reply_types=payload.reply_types,
     )
     if campaign is None:
         raise HTTPException(status_code=404, detail="SmartLead campaign is not configured")

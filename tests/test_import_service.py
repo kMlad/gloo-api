@@ -6,6 +6,7 @@ import pytest
 
 from app.models import ImportRequest
 from app.services import ImportLimitExceeded, ImportService, ImportValidationError
+from app.smartlead.client import SmartLeadError
 from app.utils import merge_non_empty
 
 
@@ -16,12 +17,16 @@ class FakeRepository:
                 "smartlead_campaign_id": 10,
                 "name": "Campaign",
                 "enabled": True,
+                "reply_types": ["positive"],
             }
         ]
+        for campaign in self.campaigns:
+            campaign.setdefault("reply_types", ["positive"])
         self.runs: dict[str, dict] = {}
         self.leads: dict[str, dict] = {}
         self.conversations: dict[tuple[int, str], dict] = {}
         self.replies: dict[str, dict] = {}
+        self.clear_calls: list[tuple[int, set[str]]] = []
 
     async def list_campaigns(self, *, enabled_only: bool = False):
         if enabled_only:
@@ -110,6 +115,21 @@ class FakeRepository:
         self.replies[values["dedupe_key"]] = reply
         return deepcopy(reply)
 
+    async def clear_unmatched_conversation_reply_types(
+        self, campaign_id, active_map_ids
+    ):
+        self.clear_calls.append((campaign_id, set(active_map_ids)))
+        cleared = 0
+        for (stored_campaign_id, map_id), conversation in self.conversations.items():
+            if (
+                stored_campaign_id == campaign_id
+                and map_id not in active_map_ids
+                and conversation.get("reply_type") is not None
+            ):
+                conversation["reply_type"] = None
+                cleared += 1
+        return cleared
+
 
 class FakeSmartLead:
     def __init__(self, *, total_count: int = 1) -> None:
@@ -119,6 +139,7 @@ class FakeSmartLead:
         return [
             {"id": 1, "name": "Interested", "sentiment_type": "positive"},
             {"id": 2, "name": "Not Interested", "sentiment_type": "negative"},
+            {"id": 6, "name": "Out Of Office", "sentiment_type": None},
         ]
 
     async def get_inbox_page(self, *, fetch_message_history, offset, **kwargs):
@@ -287,6 +308,7 @@ async def test_import_preserves_all_properties_and_only_inbound_replies() -> Non
     assert lead["custom_properties"]["qualification"]["score"] == 9
     assert len(repository.replies) == 1
     assert next(iter(repository.replies.values()))["smartlead_message_id"] == "reply-1"
+    assert repository.conversations[(10, "map-1")]["reply_type"] == "positive"
     snapshot = repository.conversations[(10, "map-1")]["lead_properties"]
     assert snapshot["_campaign_record"]["status"] == "INPROGRESS"
 
@@ -294,6 +316,7 @@ async def test_import_preserves_all_properties_and_only_inbound_replies() -> Non
     assert len(repository.leads) == 1
     assert len(repository.conversations) == 1
     assert len(repository.replies) == 1
+    assert repository.clear_calls[-1] == (10, {"map-1"})
 
 
 @pytest.mark.asyncio
@@ -366,3 +389,210 @@ async def test_disabled_requested_campaign_is_rejected_before_a_run_starts() -> 
     with pytest.raises(ImportValidationError, match="disabled"):
         await service.run(ImportRequest(campaign_ids=[10]))
     assert repository.runs == {}
+
+
+class CategorizedSmartLead:
+    def __init__(self, categories_by_campaign: dict[int, int]) -> None:
+        self.categories_by_campaign = categories_by_campaign
+        self.inbox_calls: list[tuple[tuple[int, ...], tuple[int, ...], bool]] = []
+
+    async def get_categories(self):
+        return [
+            {"id": 1, "name": "Interested", "sentiment_type": "positive"},
+            {"id": 6, "name": "Out-of-Office", "sentiment_type": None},
+        ]
+
+    async def get_inbox_page(
+        self,
+        *,
+        campaign_ids,
+        category_ids,
+        fetch_message_history,
+        offset,
+        **kwargs,
+    ):
+        self.inbox_calls.append(
+            (tuple(campaign_ids), tuple(category_ids), fetch_message_history)
+        )
+        if offset:
+            return {"messages": []}
+        messages = []
+        for campaign_id in campaign_ids:
+            category_id = self.categories_by_campaign.get(campaign_id)
+            if category_id not in category_ids:
+                continue
+            item = {
+                "email_campaign_id": campaign_id,
+                "email_lead_map_id": f"map-{campaign_id}",
+                "email_lead_id": str(campaign_id),
+                "lead_email": f"lead-{campaign_id}@example.com",
+                "lead_first_name": "Pat",
+                "lead_category_id": category_id,
+                "category_name": (
+                    "Out Of Office" if category_id == 6 else "Interested"
+                ),
+            }
+            if fetch_message_history:
+                item["email_history"] = [
+                    {
+                        "message_id": f"reply-{campaign_id}-{category_id}",
+                        "type": "REPLY",
+                        "time": "2026-08-01T10:00:00Z",
+                        "email_body": "Automated reply" if category_id == 6 else "Yes",
+                    }
+                ]
+            messages.append(item)
+        return {"messages": messages}
+
+    async def get_campaign_leads_page(
+        self, *, campaign_id, category_id, offset, **kwargs
+    ):
+        if offset or self.categories_by_campaign.get(campaign_id) != category_id:
+            return {"data": []}
+        return {
+            "data": [
+                {
+                    "campaign_lead_map_id": f"map-{campaign_id}",
+                    "lead": {
+                        "id": campaign_id,
+                        "email": f"lead-{campaign_id}@example.com",
+                        "first_name": "Pat",
+                    },
+                }
+            ]
+        }
+
+
+@pytest.mark.asyncio
+async def test_ooo_only_campaign_imports_and_classifies_ooo_replies() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "OOO",
+                "enabled": True,
+                "reply_types": ["ooo"],
+            }
+        ]
+    )
+    smartlead = CategorizedSmartLead({10: 6})
+
+    result = await ImportService(
+        repository, smartlead, max_conversations=1000
+    ).run(ImportRequest())
+
+    assert result["status"] == "succeeded"
+    assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
+    assert {
+        categories for _, categories, _ in smartlead.inbox_calls
+    } == {(6,)}
+
+
+@pytest.mark.asyncio
+async def test_mixed_campaign_reply_types_are_fetched_separately() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "Positive",
+                "enabled": True,
+                "reply_types": ["positive"],
+            },
+            {
+                "smartlead_campaign_id": 11,
+                "name": "OOO",
+                "enabled": True,
+                "reply_types": ["ooo"],
+            },
+        ]
+    )
+    smartlead = CategorizedSmartLead({10: 1, 11: 6})
+
+    result = await ImportService(
+        repository, smartlead, max_conversations=1000
+    ).run(ImportRequest())
+
+    assert result["conversations_processed"] == 2
+    assert repository.conversations[(10, "map-10")]["reply_type"] == "positive"
+    assert repository.conversations[(11, "map-11")]["reply_type"] == "ooo"
+    assert {
+        (campaigns, categories)
+        for campaigns, categories, _ in smartlead.inbox_calls
+    } == {((10,), (1,)), ((11,), (6,))}
+
+
+@pytest.mark.asyncio
+async def test_unbounded_import_updates_or_clears_current_classification() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "Both",
+                "enabled": True,
+                "reply_types": ["positive", "ooo"],
+            }
+        ]
+    )
+    smartlead = CategorizedSmartLead({10: 6})
+    service = ImportService(repository, smartlead, max_conversations=1000)
+
+    await service.run(ImportRequest())
+    smartlead.categories_by_campaign[10] = 1
+    await service.run(ImportRequest())
+    assert repository.conversations[(10, "map-10")]["reply_type"] == "positive"
+
+    smartlead.categories_by_campaign.clear()
+    await service.run(ImportRequest())
+    assert repository.conversations[(10, "map-10")]["reply_type"] is None
+
+
+@pytest.mark.asyncio
+async def test_date_bounded_import_does_not_clear_missing_classification() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "OOO",
+                "enabled": True,
+                "reply_types": ["ooo"],
+            }
+        ]
+    )
+    smartlead = CategorizedSmartLead({10: 6})
+    service = ImportService(repository, smartlead, max_conversations=1000)
+    await service.run(ImportRequest())
+
+    smartlead.categories_by_campaign.clear()
+    await service.run(
+        ImportRequest(reply_time_from=datetime(2026, 8, 1, tzinfo=UTC))
+    )
+
+    assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
+    assert len(repository.clear_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_import_does_not_clear_existing_classifications() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "OOO",
+                "enabled": True,
+                "reply_types": ["ooo"],
+            }
+        ]
+    )
+    smartlead = CategorizedSmartLead({10: 6})
+    service = ImportService(repository, smartlead, max_conversations=1000)
+    await service.run(ImportRequest())
+
+    async def failing_details(**kwargs):
+        raise SmartLeadError("detail lookup failed")
+
+    smartlead.get_campaign_leads_page = failing_details
+    result = await service.run(ImportRequest())
+
+    assert result["status"] == "partial"
+    assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
+    assert len(repository.clear_calls) == 1

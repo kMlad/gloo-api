@@ -40,7 +40,7 @@ Add an allowed campaign:
 curl -X POST http://127.0.0.1:8000/api/v1/smartlead/campaigns \
   -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"smartlead_campaign_id": 12345, "enabled": true}'
+  -d '{"smartlead_campaign_id": 12345, "enabled": true, "reply_types": ["positive", "ooo"]}'
 ```
 
 Import all enabled campaigns:
@@ -52,11 +52,16 @@ curl -X POST http://127.0.0.1:8000/api/v1/smartlead/imports \
   -d '{}'
 ```
 
-An import may instead specify `campaign_ids`, `reply_time_from`, and
+Campaign `reply_types` may be `["positive"]`, `["ooo"]`, or both and can be
+changed with `PATCH /api/v1/smartlead/campaigns/{campaign_id}`. Existing and
+new campaigns default to positive replies only. An import may instead specify
+`campaign_ids`, `reply_time_from`, and
 `reply_time_to`. Timestamps must be timezone-aware ISO 8601 values. Imports over
 the configured conversation limit are rejected before reply histories are read.
 
-List imported leads with `GET /api/v1/leads`; retrieve complete canonical,
+List imported leads with `GET /api/v1/leads`, or use
+`GET /api/v1/leads?reply_type=ooo` to select currently OOO leads for phone
+enrichment. Retrieve complete canonical,
 campaign-specific, custom-property, and reply data with
 `GET /api/v1/leads/{lead_id}`.
 

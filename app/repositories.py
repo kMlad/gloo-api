@@ -4,7 +4,7 @@ from typing import Any
 from postgrest.exceptions import APIError
 from supabase import AsyncClient
 
-from app.utils import merge_non_empty, parse_datetime, to_iso, utc_now
+from app.utils import chunks, merge_non_empty, parse_datetime, to_iso, utc_now
 
 
 class ConcurrentImportError(Exception):
@@ -35,7 +35,7 @@ class Repository:
         return response.data
 
     async def upsert_campaign(
-        self, campaign_id: int, name: str, enabled: bool
+        self, campaign_id: int, name: str, enabled: bool, reply_types: list[str]
     ) -> dict[str, Any]:
         now = to_iso(utc_now())
         response = await (
@@ -45,6 +45,7 @@ class Repository:
                     "smartlead_campaign_id": campaign_id,
                     "name": name,
                     "enabled": enabled,
+                    "reply_types": reply_types,
                     "updated_at": now,
                 },
                 on_conflict="smartlead_campaign_id",
@@ -53,12 +54,21 @@ class Repository:
         )
         return response.data[0]
 
-    async def update_campaign_enabled(
-        self, campaign_id: int, enabled: bool
+    async def update_campaign(
+        self,
+        campaign_id: int,
+        *,
+        enabled: bool | None,
+        reply_types: list[str] | None,
     ) -> dict[str, Any] | None:
+        values: dict[str, Any] = {"updated_at": to_iso(utc_now())}
+        if enabled is not None:
+            values["enabled"] = enabled
+        if reply_types is not None:
+            values["reply_types"] = reply_types
         response = await (
             self._db.table("smartlead_campaigns")
-            .update({"enabled": enabled, "updated_at": to_iso(utc_now())})
+            .update(values)
             .eq("smartlead_campaign_id", campaign_id)
             .execute()
         )
@@ -228,23 +238,31 @@ class Repository:
         )
         return response.data[0]
 
-    async def list_leads(self, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+    async def list_leads(
+        self, *, limit: int, offset: int, reply_type: str | None = None
+    ) -> tuple[list[dict[str, Any]], int]:
+        selection = "*"
+        if reply_type is not None:
+            selection += ",smartlead_conversations!inner(reply_type)"
+        query = self._db.table("leads").select(selection, count="exact")
+        if reply_type is not None:
+            query = query.eq("smartlead_conversations.reply_type", reply_type)
         response = await (
-            self._db.table("leads")
-            .select("*", count="exact")
-            .order("source_observed_at", desc=True)
+            query.order("source_observed_at", desc=True)
             .order("id")
             .range(offset, offset + limit - 1)
             .execute()
         )
         leads = response.data
+        for lead in leads:
+            lead.pop("smartlead_conversations", None)
         if not leads:
             return [], response.count or 0
 
         lead_ids = [lead["id"] for lead in leads]
         conversations_response = await (
             self._db.table("smartlead_conversations")
-            .select("id,lead_id")
+            .select("id,lead_id,reply_type")
             .in_("lead_id", lead_ids)
             .execute()
         )
@@ -273,10 +291,47 @@ class Repository:
 
         for lead in leads:
             ids = conversations_by_lead.get(lead["id"], [])
-            timestamps = [latest_by_conversation[item] for item in ids if item in latest_by_conversation]
-            lead["positive_conversation_count"] = len(ids)
+            timestamps = [
+                latest_by_conversation[item]
+                for item in ids
+                if item in latest_by_conversation
+            ]
+            lead_conversations = [
+                item for item in conversations if item["lead_id"] == lead["id"]
+            ]
+            lead["positive_conversation_count"] = sum(
+                item.get("reply_type") == "positive" for item in lead_conversations
+            )
+            lead["ooo_conversation_count"] = sum(
+                item.get("reply_type") == "ooo" for item in lead_conversations
+            )
             lead["latest_reply_at"] = max(timestamps) if timestamps else None
         return leads, response.count or len(leads)
+
+    async def clear_unmatched_conversation_reply_types(
+        self, campaign_id: int, active_map_ids: set[str]
+    ) -> int:
+        response = await (
+            self._db.table("smartlead_conversations")
+            .select("id,smartlead_campaign_lead_map_id,reply_type")
+            .eq("smartlead_campaign_id", campaign_id)
+            .execute()
+        )
+        stale_ids = [
+            str(item["id"])
+            for item in response.data
+            if item.get("reply_type") is not None
+            and str(item["smartlead_campaign_lead_map_id"]) not in active_map_ids
+        ]
+        now = to_iso(utc_now())
+        for stale_group in chunks(stale_ids, 100):
+            await (
+                self._db.table("smartlead_conversations")
+                .update({"reply_type": None, "updated_at": now})
+                .in_("id", stale_group)
+                .execute()
+            )
+        return len(stale_ids)
 
     async def get_lead_detail(self, lead_id: str) -> dict[str, Any] | None:
         lead_response = await (

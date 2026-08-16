@@ -11,21 +11,45 @@ PhoneSource = Literal[
     "airscale",
     "fullenrich",
 ]
+ReplyType = Literal["positive", "ooo"]
+
+
+def _validate_reply_types(reply_types: list[ReplyType]) -> None:
+    if not reply_types:
+        raise ValueError("reply_types must not be empty")
+    if len(set(reply_types)) != len(reply_types):
+        raise ValueError("reply_types must not contain duplicates")
 
 
 class CampaignCreate(BaseModel):
     smartlead_campaign_id: int = Field(gt=0)
     enabled: bool = True
+    reply_types: list[ReplyType] = Field(default_factory=lambda: ["positive"])
+
+    @model_validator(mode="after")
+    def validate_reply_types(self) -> "CampaignCreate":
+        _validate_reply_types(self.reply_types)
+        return self
 
 
 class CampaignUpdate(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    reply_types: list[ReplyType] | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self) -> "CampaignUpdate":
+        if self.enabled is None and self.reply_types is None:
+            raise ValueError("at least one campaign field must be provided")
+        if self.reply_types is not None:
+            _validate_reply_types(self.reply_types)
+        return self
 
 
 class CampaignResponse(BaseModel):
     smartlead_campaign_id: int
     name: str
     enabled: bool
+    reply_types: list[ReplyType]
     created_at: datetime
     updated_at: datetime
 
@@ -88,6 +112,7 @@ class LeadListItem(BaseModel):
     enriched_phone_number: str | None
     phone_source: PhoneSource | None
     positive_conversation_count: int
+    ooo_conversation_count: int
     latest_reply_at: datetime | None
 
 

@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import hashlib
 import json
 from datetime import datetime
 from typing import Any
 
-from app.models import ImportRequest
+from app.models import ImportRequest, ReplyType
 from app.repositories import Repository
 from app.smartlead.client import SmartLeadClient, SmartLeadError
 from app.utils import (
@@ -37,17 +39,27 @@ class CampaignService:
     async def list(self) -> list[dict[str, Any]]:
         return await self._repository.list_campaigns()
 
-    async def add(self, campaign_id: int, enabled: bool) -> dict[str, Any]:
+    async def add(
+        self, campaign_id: int, enabled: bool, reply_types: list[ReplyType]
+    ) -> dict[str, Any]:
         if self._smartlead is None:
             raise RuntimeError("SmartLead client is required to add a campaign")
         campaign = await self._smartlead.get_campaign(campaign_id)
         name = str(campaign.get("name") or f"SmartLead campaign {campaign_id}")
-        return await self._repository.upsert_campaign(campaign_id, name, enabled)
+        return await self._repository.upsert_campaign(
+            campaign_id, name, enabled, reply_types
+        )
 
-    async def set_enabled(
-        self, campaign_id: int, enabled: bool
+    async def update(
+        self,
+        campaign_id: int,
+        *,
+        enabled: bool | None,
+        reply_types: list[ReplyType] | None,
     ) -> dict[str, Any] | None:
-        return await self._repository.update_campaign_enabled(campaign_id, enabled)
+        return await self._repository.update_campaign(
+            campaign_id, enabled=enabled, reply_types=reply_types
+        )
 
 
 class ImportService:
@@ -80,34 +92,53 @@ class ImportService:
 
         try:
             categories = await self._smartlead.get_categories()
-            positive_category_ids = sorted(
-                {
-                    int(item["id"])
-                    for item in categories
-                    if str(item.get("sentiment_type", "")).casefold() == "positive"
-                    and item.get("id") is not None
-                }
+            category_ids_by_type = self._category_ids_by_reply_type(categories)
+            required_reply_types = {
+                reply_type
+                for campaign in campaigns
+                for reply_type in campaign.get("reply_types", ["positive"])
+            }
+            missing_reply_types = sorted(
+                reply_type
+                for reply_type in required_reply_types
+                if not category_ids_by_type[reply_type]
             )
-            if not positive_category_ids:
+            if missing_reply_types:
+                missing_labels = ", ".join(missing_reply_types)
                 completed = await self._finish_run(
                     run_id,
                     status="rejected",
                     errors=[
                         {
                             "scope": "categories",
-                            "message": "SmartLead has no positive lead categories",
+                            "message": (
+                                "SmartLead has no categories for configured reply "
+                                f"types: {missing_labels}"
+                            ),
                         }
                     ],
                 )
                 raise ImportValidationError(
-                    f"SmartLead has no positive lead categories (run {completed['id']})"
+                    "SmartLead has no categories for configured reply types "
+                    f"{missing_labels} (run {completed['id']})"
                 )
 
-            count, preflight_errors = await self._preflight(
-                campaign_ids,
-                positive_category_ids,
-                request,
+            category_type_by_id = {
+                category_id: reply_type
+                for reply_type, category_ids in category_ids_by_type.items()
+                for category_id in category_ids
+            }
+            campaign_groups = self._group_campaigns_by_category_ids(
+                campaigns, category_ids_by_type
             )
+            count = 0
+            preflight_errors: list[dict[str, Any]] = []
+            for grouped_campaign_ids, category_ids in campaign_groups:
+                group_count, group_errors = await self._preflight(
+                    grouped_campaign_ids, category_ids, request
+                )
+                count += group_count
+                preflight_errors.extend(group_errors)
             await self._repository.update_import_run(
                 run_id, {"qualifying_conversation_count": count}
             )
@@ -129,27 +160,42 @@ class ImportService:
                 )
                 raise ImportLimitExceeded(completed)
 
-            detail_by_map, detail_by_email, detail_errors = (
-                await self._fetch_campaign_lead_details(
-                    campaign_ids, positive_category_ids
+            detail_by_map: dict[tuple[int, str], dict[str, Any]] = {}
+            detail_by_email: dict[tuple[int, str], dict[str, Any]] = {}
+            detail_errors: list[dict[str, Any]] = []
+            inbox_items: list[dict[str, Any]] = []
+            inbox_errors: list[dict[str, Any]] = []
+            for grouped_campaign_ids, category_ids in campaign_groups:
+                group_by_map, group_by_email, group_detail_errors = (
+                    await self._fetch_campaign_lead_details(
+                        grouped_campaign_ids, category_ids
+                    )
                 )
-            )
-            inbox_items, inbox_errors = await self._fetch_inbox_items(
-                campaign_ids,
-                positive_category_ids,
-                request,
-            )
+                group_items, group_inbox_errors = await self._fetch_inbox_items(
+                    grouped_campaign_ids, category_ids, request
+                )
+                detail_by_map.update(group_by_map)
+                detail_by_email.update(group_by_email)
+                detail_errors.extend(group_detail_errors)
+                inbox_items.extend(group_items)
+                inbox_errors.extend(group_inbox_errors)
             errors = [*preflight_errors, *detail_errors, *inbox_errors]
 
             inbox_items.sort(key=self._item_observed_at)
             lead_ids: set[str] = set()
+            active_map_ids_by_campaign: dict[int, set[str]] = {
+                campaign_id: set() for campaign_id in campaign_ids
+            }
             conversations_processed = 0
             replies_processed = 0
 
             for item in inbox_items:
                 try:
                     result = await self._persist_item(
-                        item, detail_by_map, detail_by_email
+                        item,
+                        detail_by_map,
+                        detail_by_email,
+                        category_type_by_id,
                     )
                 except Exception as exc:
                     errors.append(
@@ -165,6 +211,9 @@ class ImportService:
                 if result is None:
                     continue
                 lead_ids.add(result["lead_id"])
+                active_map_ids_by_campaign[result["campaign_id"]].add(
+                    result["campaign_lead_map_id"]
+                )
                 conversations_processed += 1
                 replies_processed += result["reply_count"]
 
@@ -175,6 +224,16 @@ class ImportService:
                 status = "failed"
             else:
                 status = "succeeded"
+
+            if (
+                status == "succeeded"
+                and request.reply_time_from is None
+                and request.reply_time_to is None
+            ):
+                for campaign_id in campaign_ids:
+                    await self._repository.clear_unmatched_conversation_reply_types(
+                        campaign_id, active_map_ids_by_campaign[campaign_id]
+                    )
 
             return await self._finish_run(
                 run_id,
@@ -227,6 +286,53 @@ class ImportService:
         if not campaigns:
             raise ImportValidationError("No enabled SmartLead campaigns are configured")
         return campaigns
+
+    @staticmethod
+    def _category_ids_by_reply_type(
+        categories: list[dict[str, Any]],
+    ) -> dict[ReplyType, list[int]]:
+        result: dict[ReplyType, set[int]] = {"positive": set(), "ooo": set()}
+        for category in categories:
+            category_id = category.get("id")
+            if category_id is None:
+                continue
+            if str(category.get("sentiment_type") or "").casefold() == "positive":
+                result["positive"].add(int(category_id))
+            normalized_name = "".join(
+                character
+                for character in str(category.get("name") or "").casefold()
+                if character.isalnum()
+            )
+            if normalized_name == "outofoffice":
+                result["ooo"].add(int(category_id))
+        return {
+            reply_type: sorted(category_ids)
+            for reply_type, category_ids in result.items()
+        }
+
+    @staticmethod
+    def _group_campaigns_by_category_ids(
+        campaigns: list[dict[str, Any]],
+        category_ids_by_type: dict[ReplyType, list[int]],
+    ) -> list[tuple[list[int], list[int]]]:
+        grouped: dict[tuple[int, ...], list[int]] = {}
+        for campaign in campaigns:
+            category_ids = tuple(
+                sorted(
+                    {
+                        category_id
+                        for reply_type in campaign.get("reply_types", ["positive"])
+                        for category_id in category_ids_by_type[reply_type]
+                    }
+                )
+            )
+            grouped.setdefault(category_ids, []).append(
+                int(campaign["smartlead_campaign_id"])
+            )
+        return [
+            (sorted(grouped_campaign_ids), list(category_ids))
+            for category_ids, grouped_campaign_ids in grouped.items()
+        ]
 
     async def _preflight(
         self,
@@ -418,6 +524,7 @@ class ImportService:
         item: dict[str, Any],
         detail_by_map: dict[tuple[int, str], dict[str, Any]],
         detail_by_email: dict[tuple[int, str], dict[str, Any]],
+        category_type_by_id: dict[int, ReplyType],
     ) -> dict[str, Any] | None:
         campaign_id = self._campaign_id(item)
         if campaign_id is None:
@@ -448,7 +555,7 @@ class ImportService:
 
         inbound_messages = self._inbound_messages(item)
         if not inbound_messages:
-            raise ValueError("Positive conversation contains no inbound messages")
+            raise ValueError("Qualifying conversation contains no inbound messages")
         received_times = [self._message_received_at(message) for message in inbound_messages]
         observed_at = max(received_times)
         qualified_at = min(received_times)
@@ -485,6 +592,10 @@ class ImportService:
         category = item.get("category") if isinstance(item.get("category"), dict) else {}
         category_id = category.get("id") or item.get("lead_category_id")
         category_name = category.get("name") or item.get("category_name")
+        try:
+            reply_type = category_type_by_id[int(category_id)]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Inbox item has no recognized reply category") from exc
         lead_external_id = detailed_lead.get("id") or inbox_lead.get("id")
         conversation = await self._repository.upsert_conversation(
             {
@@ -496,6 +607,7 @@ class ImportService:
                 ),
                 "positive_category_id": category_id,
                 "positive_category_name": category_name,
+                "reply_type": reply_type,
                 "qualified_at": to_iso(qualified_at),
                 "lead_properties": {
                     **lead_properties,
@@ -536,7 +648,12 @@ class ImportService:
                 }
             )
 
-        return {"lead_id": str(lead["id"]), "reply_count": len(inbound_messages)}
+        return {
+            "lead_id": str(lead["id"]),
+            "campaign_id": campaign_id,
+            "campaign_lead_map_id": map_id,
+            "reply_count": len(inbound_messages),
+        }
 
     async def _finish_run(
         self,
