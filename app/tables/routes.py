@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -15,8 +16,13 @@ from fastapi import (
 
 from app.auth import AuthenticatedUser, require_authenticated_user
 from app.dependencies import get_table_service
+from app.tables.claygent import ClaygentUnavailableError
 from app.tables.csv_import import CsvImportError
 from app.tables.schemas import (
+    ClaygentExpandRequest,
+    ClaygentExpandResponse,
+    ClaygentRunCreate,
+    ClaygentRunResponse,
     ColumnCreate,
     ColumnOrderUpdate,
     ColumnResponse,
@@ -56,6 +62,10 @@ def _map_table_error(error: Exception) -> HTTPException:
     if isinstance(error, (TableValidationError, CsvImportError)):
         return HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        )
+    if isinstance(error, ClaygentUnavailableError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
         )
     raise error
 
@@ -142,7 +152,7 @@ async def delete_table(table_id: UUID, service: ServiceDependency) -> Response:
 
 @router.post(
     "/{table_id}/columns",
-    response_model=ColumnResponse,
+    response_model=ColumnResponse | TableResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def add_column(
@@ -150,11 +160,19 @@ async def add_column(
 ) -> dict[str, Any]:
     try:
         return await service.add_column(str(table_id), payload)
-    except (TableNotFoundError, TableConflictError, TableValidationError) as error:
+    except (
+        TableNotFoundError,
+        TableConflictError,
+        TableValidationError,
+        ClaygentUnavailableError,
+    ) as error:
         raise _map_table_error(error) from error
 
 
-@router.patch("/{table_id}/columns/{column_id}", response_model=ColumnResponse)
+@router.patch(
+    "/{table_id}/columns/{column_id}",
+    response_model=ColumnResponse | TableResponse,
+)
 async def update_column(
     table_id: UUID,
     column_id: UUID,
@@ -188,6 +206,73 @@ async def delete_column(
     except TableNotFoundError as error:
         raise _map_table_error(error) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{table_id}/claygent/prompts/expand",
+    response_model=ClaygentExpandResponse,
+)
+async def expand_claygent_prompt(
+    table_id: UUID,
+    payload: ClaygentExpandRequest,
+    service: ServiceDependency,
+) -> dict[str, Any]:
+    try:
+        return await service.expand_claygent_prompt(str(table_id), payload)
+    except (
+        TableNotFoundError,
+        TableValidationError,
+        ClaygentUnavailableError,
+    ) as error:
+        raise _map_table_error(error) from error
+
+
+@router.post(
+    "/{table_id}/columns/{column_id}/runs",
+    response_model=ClaygentRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_claygent_run(
+    table_id: UUID,
+    column_id: UUID,
+    service: ServiceDependency,
+    user: UserDependency,
+    background_tasks: BackgroundTasks,
+    payload: ClaygentRunCreate | None = None,
+) -> dict[str, Any]:
+    try:
+        run = await service.start_claygent_run(
+            str(table_id),
+            str(column_id),
+            payload or ClaygentRunCreate(),
+            created_by=user.id,
+        )
+    except (
+        TableNotFoundError,
+        TableValidationError,
+        ClaygentUnavailableError,
+    ) as error:
+        raise _map_table_error(error) from error
+    background_tasks.add_task(service.execute_claygent_run, str(run["id"]))
+    return run
+
+
+@router.get(
+    "/{table_id}/columns/{column_id}/runs/{run_id}",
+    response_model=ClaygentRunResponse,
+)
+async def get_claygent_run(
+    table_id: UUID,
+    column_id: UUID,
+    run_id: UUID,
+    service: ServiceDependency,
+) -> dict[str, Any]:
+    try:
+        return await service.get_claygent_run(
+            str(table_id), str(column_id), str(run_id)
+        )
+    except TableNotFoundError as error:
+        raise _map_table_error(error) from error
 
 
 @router.get("/{table_id}/rows", response_model=RowListResponse)

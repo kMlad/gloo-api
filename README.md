@@ -123,9 +123,10 @@ via Supabase's invite confirmation flow.
 ## Tables
 
 Workbook-style tables are independent of CRM leads. Any signed-in user can
-create, import, and edit them. Column types are `text` or `boolean`. Column
-order, hidden state, and filters are persisted on the table. New columns start
-empty; missing cells are returned as `null`.
+create, import, and edit them. Column types are `text`, `boolean`, or
+`claygent`. Empty `text`/`boolean` columns start blank; missing cells are
+returned as `null`. Claygent columns are a reusable research prompt that writes
+typed fields back into auto-created child columns.
 
 Create an empty table:
 
@@ -161,5 +162,67 @@ Saved filters are applied on row reads. Replace them with
 `PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
 `PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
 Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
-patch, and delete rows under `/api/v1/tables/{table_id}/rows`.
+patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Claygent columns
+are not allowed on table create or CSV import — add them after input columns
+exist.
+
+Optional prompt helper (nothing is persisted):
+
+```text
+POST /api/v1/tables/{table_id}/claygent/prompts/expand
+{"goal": "Find the CEO of {{Company}}", "column_ids": []}
+```
+
+Create a claygent column with a user prompt and output fields (`text` or
+`boolean`, max 10). Expanding the prompt is optional; if `enhanced_prompt` is
+omitted, runs interpolate `user_prompt`. The response is the full table,
+including auto-created child columns (`first_name` → `First name`).
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "CEO",
+    "type": "claygent",
+    "claygent": {
+      "user_prompt": "Find the CEO of {{Company}}",
+      "outputs": [
+        {"key": "first_name", "type": "text"},
+        {"key": "last_name", "type": "text"}
+      ]
+    }
+  }'
+```
+
+Run one row, selected rows, or the whole table (omit `row_ids`). Max 100 rows
+per run. Returns **202** with the run and items; poll
+`GET /api/v1/tables/{table_id}/columns/{column_id}/runs/{run_id}`.
+
+```text
+POST /api/v1/tables/{table_id}/columns/{column_id}/runs
+{"row_ids": ["..."], "overwrite": false}
+```
+
+`overwrite: false` (default) skips rows whose claygent cell `status` is
+`succeeded`. Parent cells are computed JSON and cannot be patched; child cells
+can. A succeeded cell looks like:
+
+```json
+{
+  "status": "succeeded",
+  "confidence": "high",
+  "confidence_reason": "LinkedIn SERP headline still lists Acme",
+  "sources": [{"url": "https://...", "title": "..."}],
+  "output": {"first_name": "Ada", "last_name": "Lovelace"},
+  "error": null
+}
+```
+
+Claygent uses the Perplexity Agent API (`web_search` only) with
+`PERPLEXITY_API_KEY`. Perplexity Pro/Max app plans do not include API access.
+Expand/run without a key returns 503. Optional tuning: `CLAYGENT_MODEL`
+(default `openai/gpt-5.4-mini`), `CLAYGENT_TIMEOUT_SECONDS`,
+`CLAYGENT_CONCURRENCY`.
+
 

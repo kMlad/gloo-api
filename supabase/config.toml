@@ -169,6 +169,8 @@ enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 # Allow/disallow new user signups to your project.
 # Invite-only: admins and sales leads create users via the API invite route.
+# Existing users can still sign in; keep [auth.email] enable_signup = true
+# so the email provider stays on.
 enable_signup = false
 # Allow/disallow anonymous sign-ins to your project.
 enable_anonymous_sign_ins = false
@@ -213,9 +215,10 @@ web3 = 30
 # secret = ""
 
 [auth.email]
-# Allow/disallow new user signups via email to your project.
-# Keep disabled so only Auth Admin invites can create users.
-enable_signup = false
+# This flag actually enables the email provider (login + signup). Keep it on
+# so invited users can sign in. Public signups are blocked by [auth]
+# enable_signup = false above (GOTRUE_DISABLE_SIGNUP).
+enable_signup = true
 # If enabled, a user will be required to confirm any email change on both the old, and new email
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true

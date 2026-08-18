@@ -10,6 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
     "httpx>=0.28.1",
+    "perplexityai>=0.43.3",
     "phonenumbers>=9.0.36",
     "pydantic-settings>=2.15.0",
     "supabase>=2.31.0",

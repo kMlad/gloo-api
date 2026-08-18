@@ -4,9 +4,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-ColumnType = Literal["text", "boolean"]
+from app.tables.claygent.protocol import ClaygentOutputField
+
+ColumnType = Literal["text", "boolean", "claygent"]
 FilterOperator = Literal["eq", "contains", "is_empty"]
 CellValue = str | bool | None
+ClaygentRunStatus = Literal["running", "succeeded", "partial", "failed"]
+ClaygentRunItemStatus = Literal["running", "succeeded", "failed", "skipped"]
 
 
 class TableFilter(BaseModel):
@@ -31,9 +35,39 @@ class TableFilter(BaseModel):
         return self
 
 
+class ClaygentConfig(BaseModel):
+    user_prompt: str = Field(min_length=1, max_length=8000)
+    enhanced_prompt: str | None = Field(default=None, max_length=16_000)
+    outputs: list[ClaygentOutputField] = Field(min_length=1, max_length=10)
+
+    @field_validator("user_prompt")
+    @classmethod
+    def strip_user_prompt(cls, value: str) -> str:
+        prompt = value.strip()
+        if not prompt:
+            raise ValueError("user_prompt must not be blank")
+        return prompt
+
+    @field_validator("enhanced_prompt")
+    @classmethod
+    def strip_enhanced_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        prompt = value.strip()
+        return prompt or None
+
+    @model_validator(mode="after")
+    def unique_output_keys(self) -> "ClaygentConfig":
+        keys = [field.key for field in self.outputs]
+        if len(set(keys)) != len(keys):
+            raise ValueError("claygent output keys must not contain duplicates")
+        return self
+
+
 class ColumnCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: ColumnType = "text"
+    claygent: ClaygentConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -43,10 +77,21 @@ class ColumnCreate(BaseModel):
             raise ValueError("name must not be blank")
         return name
 
+    @model_validator(mode="after")
+    def validate_claygent(self) -> "ColumnCreate":
+        if self.type == "claygent":
+            if self.claygent is None:
+                raise ValueError("claygent columns require a claygent config")
+            return self
+        if self.claygent is not None:
+            raise ValueError("claygent config is only valid when type is claygent")
+        return self
+
 
 class ColumnUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     hidden: bool | None = None
+    claygent: ClaygentConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -60,7 +105,7 @@ class ColumnUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_a_field(self) -> "ColumnUpdate":
-        if self.name is None and self.hidden is None:
+        if self.name is None and self.hidden is None and self.claygent is None:
             raise ValueError("at least one column field must be provided")
         return self
 
@@ -75,6 +120,9 @@ class ColumnResponse(BaseModel):
     type: ColumnType
     position: int
     hidden: bool
+    config: dict[str, Any] | None = None
+    source_column_id: UUID | None = None
+    source_field: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -96,6 +144,10 @@ class TableCreate(BaseModel):
         names = [column.name for column in self.columns]
         if len(set(names)) != len(names):
             raise ValueError("column names must not contain duplicates")
+        if any(column.type == "claygent" for column in self.columns):
+            raise ValueError(
+                "claygent columns can only be added after the table exists"
+            )
         return self
 
 
@@ -165,3 +217,88 @@ class RowListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ClaygentExpandRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=8000)
+    column_ids: list[UUID] | None = None
+
+    @field_validator("goal")
+    @classmethod
+    def strip_goal(cls, value: str) -> str:
+        goal = value.strip()
+        if not goal:
+            raise ValueError("goal must not be blank")
+        return goal
+
+    @field_validator("column_ids")
+    @classmethod
+    def unique_column_ids(cls, value: list[UUID] | None) -> list[UUID] | None:
+        if value is None:
+            return None
+        if len(set(value)) != len(value):
+            raise ValueError("column_ids must not contain duplicates")
+        return value
+
+
+class ClaygentInputColumn(BaseModel):
+    id: UUID
+    name: str
+
+
+class ClaygentExpandResponse(BaseModel):
+    user_prompt: str
+    enhanced_prompt: str
+    outputs: list[ClaygentOutputField]
+    input_columns: list[ClaygentInputColumn]
+
+
+class ClaygentRunCreate(BaseModel):
+    row_ids: list[UUID] | None = None
+    overwrite: bool = False
+
+    @field_validator("row_ids")
+    @classmethod
+    def validate_row_ids(cls, value: list[UUID] | None) -> list[UUID] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("row_ids must not be empty")
+        unique: list[UUID] = []
+        seen: set[UUID] = set()
+        for row_id in value:
+            if row_id in seen:
+                continue
+            seen.add(row_id)
+            unique.append(row_id)
+        if len(unique) > 100:
+            raise ValueError("a run may include at most 100 rows")
+        return unique
+
+
+class ClaygentRunItemResponse(BaseModel):
+    id: UUID
+    row_id: UUID
+    status: ClaygentRunItemStatus
+    error_message: str | None = None
+    model_response: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClaygentRunResponse(BaseModel):
+    id: UUID
+    table_id: UUID
+    column_id: UUID
+    created_by: UUID
+    status: ClaygentRunStatus
+    row_ids: list[UUID] | None = None
+    overwrite: bool
+    total_count: int
+    succeeded_count: int
+    failed_count: int
+    skipped_count: int
+    items: list[ClaygentRunItemResponse]
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None

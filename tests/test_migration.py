@@ -83,3 +83,29 @@ def test_workbook_tables_migration_is_private_and_typed() -> None:
     assert "unique (table_id, position)" in migration
     assert "table_rows_values_gin_idx" in migration
     assert "using gin (values)" in migration
+
+
+def test_claygent_columns_migration_widens_type_and_stays_private() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_claygent_columns.sql")
+    ).read_text()
+    assert "check (type in ('text', 'boolean', 'claygent'))" in migration
+    assert "drop constraint if exists table_columns_type_check" in migration
+    assert "add column config jsonb" in migration
+    assert "add column source_column_id uuid" in migration
+    assert "on delete cascade" in migration
+    tables = ["table_claygent_runs", "table_claygent_run_items"]
+    for table in tables:
+        assert f"alter table public.{table} enable row level security" in migration
+        assert (
+            f"revoke all on table public.{table} from public, anon, authenticated"
+            in migration
+        )
+        assert f"revoke all on table public.{table} from service_role" in migration
+        assert (
+            f"grant select, insert, update, delete on table public.{table} to service_role"
+            in migration
+        )
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration
+    assert "status in ('running', 'succeeded', 'partial', 'failed')" in migration

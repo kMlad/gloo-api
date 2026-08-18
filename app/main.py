@@ -6,6 +6,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import AsyncClient, acreate_client
 
+from perplexity import AsyncPerplexity
+
 from app.env import get_env, load_cors_allowed_origins
 from app.phone_enrichment.providers import (
     AirScaleClient,
@@ -25,6 +27,7 @@ from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
+from app.tables.claygent.perplexity import PerplexityClaygentAgent
 from app.tables.repository import TableRepository
 from app.tables.routes import router as tables_router
 from app.tables.service import TableService
@@ -70,7 +73,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.supabase = supabase
     app.state.repository = Repository(supabase)
-    app.state.table_service = TableService(TableRepository(supabase))
+    claygent_agent = None
+    perplexity_client = None
+    if env.perplexity_api_key is not None:
+        perplexity_client = AsyncPerplexity(
+            api_key=env.perplexity_api_key.get_secret_value(),
+            timeout=env.claygent_timeout_seconds,
+        )
+        claygent_agent = PerplexityClaygentAgent(
+            perplexity_client,
+            model=env.claygent_model,
+        )
+    app.state.table_service = TableService(
+        TableRepository(supabase),
+        claygent_agent=claygent_agent,
+        claygent_concurrency=env.claygent_concurrency,
+    )
     app.state.smartlead = SmartLeadClient(
         smartlead_http,
         env.smartlead_api_key.get_secret_value(),
@@ -116,6 +134,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await prospeo_http.aclose()
         await airscale_http.aclose()
         await fullenrich_http.aclose()
+        if perplexity_client is not None:
+            await perplexity_client.close()
         if supabase._postgrest is not None:
             await supabase._postgrest.aclose()
         await supabase.auth.close()

@@ -36,6 +36,8 @@ class FakeTableRepository:
         self.tables: dict[str, dict] = {}
         self.columns: dict[str, dict] = {}
         self.rows: dict[str, dict] = {}
+        self.runs: dict[str, dict] = {}
+        self.run_items: dict[str, dict] = {}
 
     async def list_tables(self) -> list[dict]:
         items = []
@@ -100,6 +102,12 @@ class FakeTableRepository:
         for row_id, row in list(self.rows.items()):
             if row["table_id"] == table_id:
                 del self.rows[row_id]
+        for run_id, run in list(self.runs.items()):
+            if run["table_id"] == table_id:
+                del self.runs[run_id]
+                for item_id, item in list(self.run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.run_items[item_id]
         return existed
 
     async def list_columns(self, table_id: str) -> list[dict]:
@@ -133,6 +141,7 @@ class FakeTableRepository:
         name: str | None = None,
         hidden: bool | None = None,
         position: int | None = None,
+        config: dict | None = None,
     ) -> dict | None:
         column = self.columns.get(column_id)
         if column is None:
@@ -144,6 +153,8 @@ class FakeTableRepository:
             updated["hidden"] = hidden
         if position is not None:
             updated["position"] = position
+        if config is not None:
+            updated["config"] = config
         self._assert_unique_column(updated, ignore_id=column_id)
         updated["updated_at"] = _now()
         self.columns[column_id] = updated
@@ -154,7 +165,17 @@ class FakeTableRepository:
             await self.update_column(column_id, position=position)
 
     async def delete_column(self, column_id: str) -> bool:
-        return self.columns.pop(column_id, None) is not None
+        for child_id, column in list(self.columns.items()):
+            if str(column.get("source_column_id") or "") == column_id:
+                del self.columns[child_id]
+        existed = self.columns.pop(column_id, None) is not None
+        for run_id, run in list(self.runs.items()):
+            if run["column_id"] == column_id:
+                del self.runs[run_id]
+                for item_id, item in list(self.run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.run_items[item_id]
+        return existed
 
     async def max_column_position(self, table_id: str) -> int | None:
         positions = [
@@ -207,6 +228,59 @@ class FakeTableRepository:
         for row_id, values in updates:
             await self.update_row_values(row_id, values)
 
+    async def insert_claygent_run(self, record: dict) -> dict:
+        run_id = record.get("id") or str(uuid4())
+        stored = {**record, "id": run_id}
+        self.runs[run_id] = stored
+        return deepcopy(stored)
+
+    async def update_claygent_run(self, run_id: str, values: dict) -> dict | None:
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        run.update(values)
+        run["updated_at"] = _now()
+        return deepcopy(run)
+
+    async def get_claygent_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict | None:
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        if run["table_id"] != table_id or run["column_id"] != column_id:
+            return None
+        return deepcopy(run)
+
+    async def get_claygent_run_by_id(self, run_id: str) -> dict | None:
+        run = self.runs.get(run_id)
+        return deepcopy(run) if run else None
+
+    async def insert_claygent_run_items(self, items: list[dict]) -> list[dict]:
+        inserted = []
+        for item in items:
+            item_id = item.get("id") or str(uuid4())
+            stored = {**item, "id": item_id}
+            self.run_items[item_id] = stored
+            inserted.append(deepcopy(stored))
+        return inserted
+
+    async def list_claygent_run_items(self, run_id: str) -> list[dict]:
+        items = [
+            deepcopy(item)
+            for item in self.run_items.values()
+            if item["run_id"] == run_id
+        ]
+        return sorted(items, key=lambda item: (item["created_at"], item["id"]))
+
+    async def update_claygent_run_item(self, item_id: str, values: dict) -> dict | None:
+        item = self.run_items.get(item_id)
+        if item is None:
+            return None
+        item.update(values)
+        item["updated_at"] = _now()
+        return deepcopy(item)
+
     def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
         for existing in self.columns.values():
             if existing["id"] == ignore_id:
@@ -225,9 +299,9 @@ class FakeTableRepository:
                 raise _unique_error()
 
 
-def _service() -> tuple[TableService, FakeTableRepository]:
+def _service(agent=None) -> tuple[TableService, FakeTableRepository]:
     repository = FakeTableRepository()
-    return TableService(repository), repository
+    return TableService(repository, claygent_agent=agent), repository
 
 
 @pytest.mark.asyncio
