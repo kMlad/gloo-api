@@ -18,9 +18,12 @@ Copy `.env.example` to `.env.local` and provide:
 
 Never expose the Supabase secret key or internal token in a browser client.
 
-Local Auth is invite-only (`enable_signup = false` in `supabase/config.toml`).
-On a hosted project, disable public signup the same way: Dashboard → Auth →
-Providers → Email. Admin invites still create users when signup is disabled.
+Local Auth is invite-only (`[auth] enable_signup = false` in
+`supabase/config.toml`). Keep `[auth.email] enable_signup = true` so invited
+users can still sign in; that flag enables the email provider, not public
+signup. On a hosted project, leave the Email provider enabled and turn off
+**Allow new users to sign up**. Admin invites still create users when signup
+is disabled.
 
 ## Local setup
 
@@ -37,7 +40,8 @@ All integration and lead endpoints require:
 Authorization: Bearer <INTERNAL_API_TOKEN>
 ```
 
-User invite endpoints instead require a Supabase user access token:
+User invite endpoints and table (workbook) endpoints require a Supabase user
+access token:
 
 ```text
 Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
@@ -115,3 +119,47 @@ curl -X POST http://127.0.0.1:8000/api/v1/users/invites \
 Local invite emails are captured by Inbucket at `http://127.0.0.1:54324`. Hosted
 projects need SMTP configured. After the invite email, the user sets a password
 via Supabase's invite confirmation flow.
+
+## Tables
+
+Workbook-style tables are independent of CRM leads. Any signed-in user can
+create, import, and edit them. Column types are `text` or `boolean`. Column
+order, hidden state, and filters are persisted on the table. New columns start
+empty; missing cells are returned as `null`.
+
+Create an empty table:
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/tables \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Outbound Aug", "columns": [{"name": "Company", "type": "text"}]}'
+```
+
+Import a CSV as a **new** table (headers become text columns; optional `name`
+overrides the filename):
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/tables/imports \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -F "file=@leads.csv" \
+  -F "name=Outbound Aug"
+```
+
+CSV files must be UTF-8, comma-separated, at most 5 MB, 50 columns, and 10,000
+data rows. Duplicate or empty headers are rejected.
+
+List tables with `GET /api/v1/tables`. Load schema, saved filters, and column
+order with `GET /api/v1/tables/{table_id}`. Rows are paged separately:
+
+```text
+GET /api/v1/tables/{table_id}/rows?limit=100&offset=0
+```
+
+Saved filters are applied on row reads. Replace them with
+`PUT /api/v1/tables/{table_id}/filters`. Rename or hide a column with
+`PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
+`PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
+Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
+patch, and delete rows under `/api/v1/tables/{table_id}/rows`.
+

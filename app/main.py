@@ -25,6 +25,9 @@ from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
+from app.tables.repository import TableRepository
+from app.tables.routes import router as tables_router
+from app.tables.service import TableService
 
 
 @asynccontextmanager
@@ -67,6 +70,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.supabase = supabase
     app.state.repository = Repository(supabase)
+    app.state.table_service = TableService(TableRepository(supabase))
     app.state.smartlead = SmartLeadClient(
         smartlead_http,
         env.smartlead_api_key.get_secret_value(),
@@ -141,6 +145,7 @@ def create_app(
     application.include_router(phone_enrichment_router)
     application.include_router(phone_enrichment_webhook_router)
     application.include_router(users_router)
+    application.include_router(tables_router)
     return application
 
 
