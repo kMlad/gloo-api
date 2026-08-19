@@ -376,7 +376,7 @@ class TableService:
                 "table_id": table_id,
                 "column_id": column_id,
                 "created_by": created_by,
-                "status": "running",
+                "status": "queued",
                 "row_ids": (
                     [str(row_id) for row_id in payload.row_ids]
                     if payload.row_ids is not None
@@ -404,11 +404,11 @@ class TableService:
                 and isinstance(cell, dict)
                 and cell.get("status") == "succeeded"
             )
-            item_status = "skipped" if skip else "running"
+            item_status = "skipped" if skip else "queued"
             if skip:
                 skipped += 1
             else:
-                values[column_id] = _claygent_cell(status="running")
+                values[column_id] = _claygent_cell(status="queued")
                 cell_updates.append((row_id, values))
             items.append(
                 {
@@ -435,6 +435,7 @@ class TableService:
             return
         table_id = str(run["table_id"])
         column_id = str(run["column_id"])
+        await self._repository.update_claygent_run(run_id, {"status": "running"})
         try:
             columns = await self._require_columns(table_id)
             column = _column_by_id(columns, column_id)
@@ -471,7 +472,12 @@ class TableService:
 
             await asyncio.gather(*(process(item) for item in items))
         except Exception as error:
-            await self._fail_open_run_items(run_id, str(error))
+            await self._fail_open_run_items(
+                run_id,
+                str(error),
+                table_id=table_id,
+                column_id=column_id,
+            )
         await self._finalize_claygent_run(run_id)
         await self._repository.update_table(table_id)
 
@@ -628,6 +634,9 @@ class TableService:
             )
             return
         values = dict(fresh.get("values") or {})
+        values[column_id] = _claygent_cell(status="running")
+        await self._repository.replace_row_values([(row_id, values)])
+        await self._repository.update_claygent_run_item(item_id, {"status": "running"})
         try:
             interpolated = interpolate_prompt(
                 prompt,
@@ -669,14 +678,28 @@ class TableService:
             },
         )
 
-    async def _fail_open_run_items(self, run_id: str, message: str) -> None:
+    async def _fail_open_run_items(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        table_id: str,
+        column_id: str,
+    ) -> None:
         items = await self._repository.list_claygent_run_items(run_id)
         for item in items:
-            if item["status"] == "running":
-                await self._repository.update_claygent_run_item(
-                    str(item["id"]),
-                    {"status": "failed", "error_message": message},
-                )
+            if item["status"] not in {"queued", "running"}:
+                continue
+            await self._repository.update_claygent_run_item(
+                str(item["id"]),
+                {"status": "failed", "error_message": message},
+            )
+            row = await self._repository.get_row(table_id, str(item["row_id"]))
+            if row is None:
+                continue
+            values = dict(row.get("values") or {})
+            values[column_id] = _claygent_cell(status="failed", error=message)
+            await self._repository.replace_row_values([(str(item["row_id"]), values)])
 
     async def _finalize_claygent_run(self, run_id: str) -> None:
         items = await self._repository.list_claygent_run_items(run_id)

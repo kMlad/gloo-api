@@ -1,3 +1,4 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -16,8 +17,8 @@ from app.tables.schemas import (
     TableFilter,
     TableFiltersUpdate,
 )
-from app.tables.service import TableNotFoundError, TableValidationError
-from tests.test_table_service import _service
+from app.tables.service import TableNotFoundError, TableService, TableValidationError
+from tests.test_table_service import FakeTableRepository, _service
 
 
 class FakeClaygentAgent:
@@ -165,7 +166,10 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
         ClaygentRunCreate(row_ids=[row["id"]]),
         created_by=str(uuid4()),
     )
-    assert run["status"] == "running"
+    assert run["status"] == "queued"
+    assert run["items"][0]["status"] == "queued"
+    pending = await service.list_rows(table["id"], limit=100, offset=0)
+    assert pending["items"][0]["values"][str(parent["id"])]["status"] == "queued"
     await service.execute_claygent_run(run["id"])
     finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
     assert finished["status"] == "succeeded"
@@ -182,6 +186,91 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     assert values[str(last["id"])] == "Lovelace"
     stored_item = next(iter(repository.run_items.values()))
     assert stored_item["model_response"]["usage_cost"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_run_stays_queued_until_a_worker_starts() -> None:
+    class GatedAgent(FakeClaygentAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def research(self, *, prompt: str, outputs: list[ClaygentOutputField]):
+            self.entered.set()
+            await self.gate.wait()
+            return await super().research(prompt=prompt, outputs=outputs)
+
+    agent = GatedAgent()
+    service = TableService(
+        FakeTableRepository(), claygent_agent=agent, claygent_concurrency=1
+    )
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    first_row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    second_row = await service.add_row(
+        table["id"], RowCreate(values={company_id: "Globex"})
+    )
+    created = await service.add_column(table["id"], _claygent_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    parent_id = str(parent["id"])
+
+    run = await service.start_claygent_run(
+        table["id"],
+        parent["id"],
+        ClaygentRunCreate(row_ids=[first_row["id"], second_row["id"]]),
+        created_by=str(uuid4()),
+    )
+    assert run["status"] == "queued"
+    assert {item["status"] for item in run["items"]} == {"queued"}
+
+    task = asyncio.create_task(service.execute_claygent_run(run["id"]))
+    await agent.entered.wait()
+    in_progress = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    assert in_progress["status"] == "running"
+    assert {item["status"] for item in in_progress["items"]} == {"queued", "running"}
+    listed = await service.list_rows(table["id"], limit=100, offset=0)
+    assert {row["values"][parent_id]["status"] for row in listed["items"]} == {
+        "queued",
+        "running",
+    }
+
+    agent.gate.set()
+    await task
+    finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    assert finished["status"] == "succeeded"
+    assert {item["status"] for item in finished["items"]} == {"succeeded"}
+
+
+@pytest.mark.asyncio
+async def test_queued_items_fail_when_execute_cannot_start() -> None:
+    service, _repository = _service(FakeClaygentAgent())
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    created = await service.add_column(table["id"], _claygent_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    run = await service.start_claygent_run(
+        table["id"],
+        parent["id"],
+        ClaygentRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    service._agent = None
+    await service.execute_claygent_run(run["id"])
+    finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    assert finished["status"] == "failed"
+    assert finished["items"][0]["status"] == "failed"
+    listed = await service.list_rows(table["id"], limit=100, offset=0)
+    cell = listed["items"][0]["values"][str(parent["id"])]
+    assert cell["status"] == "failed"
+    assert cell["error"] == "Claygent is not configured"
 
 
 @pytest.mark.asyncio

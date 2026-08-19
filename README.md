@@ -196,7 +196,9 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
 ```
 
 Run one row, selected rows, or the whole table (omit `row_ids`). Max 100 rows
-per run. Returns **202** with the run and items; poll
+per run. Returns **202** with the run and items in `queued` status. Parent
+cells start as `queued`, then flip to `running` when a worker picks them up
+(`CLAYGENT_CONCURRENCY`, default 3). Poll
 `GET /api/v1/tables/{table_id}/columns/{column_id}/runs/{run_id}`.
 
 ```text

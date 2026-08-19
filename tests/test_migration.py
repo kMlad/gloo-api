@@ -109,3 +109,20 @@ def test_claygent_columns_migration_widens_type_and_stays_private() -> None:
     assert "to anon" not in migration
     assert "to authenticated" not in migration
     assert "status in ('running', 'succeeded', 'partial', 'failed')" in migration
+
+
+def test_claygent_queued_status_migration_widens_run_checks() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_claygent_queued_status.sql")
+    ).read_text()
+    assert "queued" in migration
+    assert "table_claygent_runs_status_check" in migration
+    assert "table_claygent_run_items_status_check" in migration
+    assert (
+        "status in ('queued', 'running', 'succeeded', 'partial', 'failed')"
+        in migration
+    )
+    assert (
+        "status in ('queued', 'running', 'succeeded', 'failed', 'skipped')"
+        in migration
+    )

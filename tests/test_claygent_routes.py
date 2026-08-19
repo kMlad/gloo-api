@@ -89,7 +89,7 @@ class ClaygentServiceStub:
             "table_id": table_id,
             "column_id": column_id,
             "created_by": created_by,
-            "status": "running",
+            "status": "queued",
             "row_ids": [str(item) for item in payload.row_ids or []],
             "overwrite": payload.overwrite,
             "total_count": 1,
@@ -100,7 +100,7 @@ class ClaygentServiceStub:
                 {
                     "id": str(uuid4()),
                     "row_id": str(uuid4()),
-                    "status": "running",
+                    "status": "queued",
                     "error_message": None,
                     "model_response": None,
                     "created_at": now,
@@ -174,8 +174,8 @@ async def test_expand_and_run_routes() -> None:
             json={"row_ids": [str(uuid4())]},
         )
         assert started.status_code == 202
-        assert started.json()["status"] == "running"
-        assert started.json()["items"][0]["status"] == "running"
+        assert started.json()["status"] == "queued"
+        assert started.json()["items"][0]["status"] == "queued"
 
         fetched = await client.get(
             f"/api/v1/tables/{table_id}/columns/{column_id}/runs/{service.run_id}",

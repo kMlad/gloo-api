@@ -9,8 +9,8 @@ from app.tables.claygent.protocol import ClaygentOutputField
 ColumnType = Literal["text", "boolean", "claygent"]
 FilterOperator = Literal["eq", "contains", "is_empty"]
 CellValue = str | bool | None
-ClaygentRunStatus = Literal["running", "succeeded", "partial", "failed"]
-ClaygentRunItemStatus = Literal["running", "succeeded", "failed", "skipped"]
+ClaygentRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
+ClaygentRunItemStatus = Literal["queued", "running", "succeeded", "failed", "skipped"]
 
 
 class TableFilter(BaseModel):
