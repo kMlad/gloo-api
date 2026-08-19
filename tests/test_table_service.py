@@ -125,11 +125,23 @@ class FakeTableRepository:
         return deepcopy(column)
 
     async def insert_columns(self, columns: list[dict]) -> list[dict]:
+        keys = {key for column in columns for key in column}
         inserted = []
         for column in columns:
-            self._assert_unique_column(column)
-            column_id = column.get("id") or str(uuid4())
-            record = {**column, "id": column_id}
+            record = {key: column.get(key) for key in keys}
+            if "id" in keys and record.get("id") is None:
+                raise APIError(
+                    {
+                        "message": (
+                            'null value in column "id" of relation '
+                            '"table_columns" violates not-null constraint'
+                        ),
+                        "code": "23502",
+                    }
+                )
+            self._assert_unique_column(record)
+            column_id = record.get("id") or str(uuid4())
+            record = {**record, "id": column_id}
             self.columns[column_id] = record
             inserted.append(deepcopy(record))
         return sorted(inserted, key=lambda column: (column["position"], column["id"]))

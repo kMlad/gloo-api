@@ -524,17 +524,14 @@ class TableService:
             child_name = unique_child_name(payload.name, field.key, taken)
             taken.add(child_name)
             records.append(
-                {
-                    "table_id": table_id,
-                    "name": child_name,
-                    "type": field.type,
-                    "position": next_position + 1 + index,
-                    "hidden": False,
-                    "source_column_id": parent_id,
-                    "source_field": field.key,
-                    "created_at": now,
-                    "updated_at": now,
-                }
+                _claygent_child_record(
+                    table_id=table_id,
+                    name=child_name,
+                    field=field,
+                    position=next_position + 1 + index,
+                    source_column_id=parent_id,
+                    now=now,
+                )
             )
         try:
             await self._repository.insert_columns(records)
@@ -586,17 +583,14 @@ class TableService:
                 child_name = unique_child_name(parent_name, field.key, taken)
                 taken.add(child_name)
                 records.append(
-                    {
-                        "table_id": table_id,
-                        "name": child_name,
-                        "type": field.type,
-                        "position": next_position + index,
-                        "hidden": False,
-                        "source_column_id": str(column["id"]),
-                        "source_field": field.key,
-                        "created_at": now,
-                        "updated_at": now,
-                    }
+                    _claygent_child_record(
+                        table_id=table_id,
+                        name=child_name,
+                        field=field,
+                        position=next_position + index,
+                        source_column_id=str(column["id"]),
+                        now=now,
+                    )
                 )
             try:
                 await self._repository.insert_columns(records)
@@ -900,6 +894,29 @@ def _normalize_values(
             raise TableValidationError(f"Column {column['name']} requires a boolean")
         result[key] = value
     return result
+
+
+def _claygent_child_record(
+    *,
+    table_id: str,
+    name: str,
+    field: ClaygentOutputField,
+    position: int,
+    source_column_id: str,
+    now: str,
+) -> dict[str, Any]:
+    return {
+        "id": str(uuid4()),
+        "table_id": table_id,
+        "name": name,
+        "type": field.type,
+        "position": position,
+        "hidden": False,
+        "source_column_id": source_column_id,
+        "source_field": field.key,
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def _claygent_config_record(

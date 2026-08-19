@@ -122,6 +122,7 @@ async def test_create_claygent_column_inserts_child_columns() -> None:
     ]
     assert {column["source_field"] for column in children} == {"first_name", "last_name"}
     assert all(column["type"] == "text" for column in children)
+    assert all(column.get("id") for column in children)
 
 
 @pytest.mark.asyncio
