@@ -4,13 +4,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.tables.claygent.protocol import ClaygentOutputField
+from app.tables.sheriff.protocol import SheriffOutputField
 
-ColumnType = Literal["text", "boolean", "claygent"]
+ColumnType = Literal["text", "boolean", "sheriff"]
 FilterOperator = Literal["eq", "contains", "is_empty"]
 CellValue = str | bool | None
-ClaygentRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
-ClaygentRunItemStatus = Literal["queued", "running", "succeeded", "failed", "skipped"]
+SheriffRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
+SheriffRunItemStatus = Literal["queued", "running", "succeeded", "failed", "skipped"]
 
 
 class TableFilter(BaseModel):
@@ -35,10 +35,10 @@ class TableFilter(BaseModel):
         return self
 
 
-class ClaygentConfig(BaseModel):
+class SheriffConfig(BaseModel):
     user_prompt: str = Field(min_length=1, max_length=8000)
     enhanced_prompt: str | None = Field(default=None, max_length=16_000)
-    outputs: list[ClaygentOutputField] = Field(min_length=1, max_length=10)
+    outputs: list[SheriffOutputField] = Field(min_length=1, max_length=10)
 
     @field_validator("user_prompt")
     @classmethod
@@ -57,17 +57,17 @@ class ClaygentConfig(BaseModel):
         return prompt or None
 
     @model_validator(mode="after")
-    def unique_output_keys(self) -> "ClaygentConfig":
+    def unique_output_keys(self) -> "SheriffConfig":
         keys = [field.key for field in self.outputs]
         if len(set(keys)) != len(keys):
-            raise ValueError("claygent output keys must not contain duplicates")
+            raise ValueError("sheriff output keys must not contain duplicates")
         return self
 
 
 class ColumnCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: ColumnType = "text"
-    claygent: ClaygentConfig | None = None
+    sheriff: SheriffConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -78,20 +78,20 @@ class ColumnCreate(BaseModel):
         return name
 
     @model_validator(mode="after")
-    def validate_claygent(self) -> "ColumnCreate":
-        if self.type == "claygent":
-            if self.claygent is None:
-                raise ValueError("claygent columns require a claygent config")
+    def validate_sheriff(self) -> "ColumnCreate":
+        if self.type == "sheriff":
+            if self.sheriff is None:
+                raise ValueError("sheriff columns require a sheriff config")
             return self
-        if self.claygent is not None:
-            raise ValueError("claygent config is only valid when type is claygent")
+        if self.sheriff is not None:
+            raise ValueError("sheriff config is only valid when type is sheriff")
         return self
 
 
 class ColumnUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     hidden: bool | None = None
-    claygent: ClaygentConfig | None = None
+    sheriff: SheriffConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -105,7 +105,7 @@ class ColumnUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_a_field(self) -> "ColumnUpdate":
-        if self.name is None and self.hidden is None and self.claygent is None:
+        if self.name is None and self.hidden is None and self.sheriff is None:
             raise ValueError("at least one column field must be provided")
         return self
 
@@ -144,9 +144,9 @@ class TableCreate(BaseModel):
         names = [column.name for column in self.columns]
         if len(set(names)) != len(names):
             raise ValueError("column names must not contain duplicates")
-        if any(column.type == "claygent" for column in self.columns):
+        if any(column.type == "sheriff" for column in self.columns):
             raise ValueError(
-                "claygent columns can only be added after the table exists"
+                "sheriff columns can only be added after the table exists"
             )
         return self
 
@@ -219,7 +219,7 @@ class RowListResponse(BaseModel):
     offset: int
 
 
-class ClaygentExpandRequest(BaseModel):
+class SheriffExpandRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=8000)
     column_ids: list[UUID] | None = None
 
@@ -241,19 +241,19 @@ class ClaygentExpandRequest(BaseModel):
         return value
 
 
-class ClaygentInputColumn(BaseModel):
+class SheriffInputColumn(BaseModel):
     id: UUID
     name: str
 
 
-class ClaygentExpandResponse(BaseModel):
+class SheriffExpandResponse(BaseModel):
     user_prompt: str
     enhanced_prompt: str
-    outputs: list[ClaygentOutputField]
-    input_columns: list[ClaygentInputColumn]
+    outputs: list[SheriffOutputField]
+    input_columns: list[SheriffInputColumn]
 
 
-class ClaygentRunCreate(BaseModel):
+class SheriffRunCreate(BaseModel):
     row_ids: list[UUID] | None = None
     overwrite: bool = False
 
@@ -276,29 +276,29 @@ class ClaygentRunCreate(BaseModel):
         return unique
 
 
-class ClaygentRunItemResponse(BaseModel):
+class SheriffRunItemResponse(BaseModel):
     id: UUID
     row_id: UUID
-    status: ClaygentRunItemStatus
+    status: SheriffRunItemStatus
     error_message: str | None = None
     model_response: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 
 
-class ClaygentRunResponse(BaseModel):
+class SheriffRunResponse(BaseModel):
     id: UUID
     table_id: UUID
     column_id: UUID
     created_by: UUID
-    status: ClaygentRunStatus
+    status: SheriffRunStatus
     row_ids: list[UUID] | None = None
     overwrite: bool
     total_count: int
     succeeded_count: int
     failed_count: int
     skipped_count: int
-    items: list[ClaygentRunItemResponse]
+    items: list[SheriffRunItemResponse]
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None

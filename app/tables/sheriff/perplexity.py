@@ -5,17 +5,17 @@ from typing import Any
 
 from perplexity import AsyncPerplexity
 
-from app.tables.claygent.prompts import (
+from app.tables.sheriff.prompts import (
     EXPAND_INSTRUCTIONS,
     RESEARCH_INSTRUCTIONS,
     envelope_json_schema,
     expand_json_schema,
 )
-from app.tables.claygent.protocol import (
-    ClaygentExpandResult,
-    ClaygentOutputField,
-    ClaygentResearchResult,
-    ClaygentSource,
+from app.tables.sheriff.protocol import (
+    SheriffExpandResult,
+    SheriffOutputField,
+    SheriffResearchResult,
+    SheriffSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
-class PerplexityClaygentAgent:
+class PerplexitySheriffAgent:
     def __init__(
         self,
         client: AsyncPerplexity,
@@ -35,7 +35,7 @@ class PerplexityClaygentAgent:
 
     async def expand(
         self, *, goal: str, column_names: list[str]
-    ) -> ClaygentExpandResult:
+    ) -> SheriffExpandResult:
         columns = ", ".join(column_names) if column_names else "(none)"
         payload = await self._create(
             input=(
@@ -43,34 +43,34 @@ class PerplexityClaygentAgent:
                 f"Goal:\n{goal}"
             ),
             instructions=EXPAND_INSTRUCTIONS,
-            schema_name="claygent_expand",
+            schema_name="sheriff_expand",
             schema=expand_json_schema(),
             search=False,
             max_steps=1,
         )
         data = _parse_json_object(payload["text"])
         outputs = [
-            ClaygentOutputField.model_validate(item)
+            SheriffOutputField.model_validate(item)
             for item in data.get("outputs") or []
         ]
         enhanced = str(data.get("enhanced_prompt") or "").strip()
         if not enhanced or not outputs:
-            raise ValueError("Claygent expand did not return a prompt and outputs")
-        return ClaygentExpandResult(enhanced_prompt=enhanced, outputs=outputs[:10])
+            raise ValueError("Sheriff expand did not return a prompt and outputs")
+        return SheriffExpandResult(enhanced_prompt=enhanced, outputs=outputs[:10])
 
     async def research(
-        self, *, prompt: str, outputs: list[ClaygentOutputField]
-    ) -> ClaygentResearchResult:
+        self, *, prompt: str, outputs: list[SheriffOutputField]
+    ) -> SheriffResearchResult:
         payload = await self._create(
             input=prompt,
             instructions=RESEARCH_INSTRUCTIONS,
-            schema_name="claygent_research",
+            schema_name="sheriff_research",
             schema=envelope_json_schema(outputs),
             search=True,
             max_steps=4,
         )
         data = _parse_json_object(payload["text"])
-        result = ClaygentResearchResult.model_validate(
+        result = SheriffResearchResult.model_validate(
             {
                 "output": data.get("output") or {},
                 "confidence": data.get("confidence") or "low",
@@ -92,7 +92,7 @@ class PerplexityClaygentAgent:
             result.sources = _merge_sources(result.sources, payload["sources"])
         result.raw["sources"] = [item.model_dump() for item in result.sources]
         if result.usage_cost is not None:
-            logger.info("claygent usage cost total_cost=%s", result.usage_cost)
+            logger.info("sheriff usage cost total_cost=%s", result.usage_cost)
         return result
 
     async def _create(
@@ -124,10 +124,10 @@ class PerplexityClaygentAgent:
         if dumped.get("status") not in {None, "completed"}:
             error = dumped.get("error") or {}
             message = error.get("message") if isinstance(error, dict) else None
-            raise RuntimeError(message or f"Claygent agent status {dumped.get('status')}")
+            raise RuntimeError(message or f"Sheriff agent status {dumped.get('status')}")
         text = _output_text(dumped)
         if not text:
-            raise RuntimeError("Claygent agent returned an empty response")
+            raise RuntimeError("Sheriff agent returned an empty response")
         return {
             "text": text,
             "sources": _search_sources(dumped),
@@ -158,8 +158,8 @@ def _output_text(dumped: dict[str, Any]) -> str:
     return "\n".join(chunks).strip()
 
 
-def _search_sources(dumped: dict[str, Any]) -> list[ClaygentSource]:
-    sources: list[ClaygentSource] = []
+def _search_sources(dumped: dict[str, Any]) -> list[SheriffSource]:
+    sources: list[SheriffSource] = []
     seen: set[str] = set()
     for item in dumped.get("output") or []:
         if not isinstance(item, dict):
@@ -174,7 +174,7 @@ def _search_sources(dumped: dict[str, Any]) -> list[ClaygentSource]:
                     continue
                 seen.add(url)
                 sources.append(
-                    ClaygentSource(url=url, title=str(result.get("title") or ""))
+                    SheriffSource(url=url, title=str(result.get("title") or ""))
                 )
         if item.get("type") == "message":
             for part in item.get("content") or []:
@@ -188,7 +188,7 @@ def _search_sources(dumped: dict[str, Any]) -> list[ClaygentSource]:
                         continue
                     seen.add(url)
                     sources.append(
-                        ClaygentSource(
+                        SheriffSource(
                             url=url, title=str(annotation.get("title") or "")
                         )
                     )
@@ -213,21 +213,21 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as error:
-        raise ValueError("Claygent agent did not return valid JSON") from error
+        raise ValueError("Sheriff agent did not return valid JSON") from error
     if not isinstance(parsed, dict):
-        raise ValueError("Claygent agent JSON must be an object")
+        raise ValueError("Sheriff agent JSON must be an object")
     return parsed
 
 
 def _merge_sources(
-    primary: list[ClaygentSource], extra: list[ClaygentSource]
-) -> list[ClaygentSource]:
+    primary: list[SheriffSource], extra: list[SheriffSource]
+) -> list[SheriffSource]:
     seen: set[str] = set()
-    merged: list[ClaygentSource] = []
+    merged: list[SheriffSource] = []
     for item in [*primary, *extra]:
         url = item.url.strip()
         if not url or url in seen:
             continue
         seen.add(url)
-        merged.append(ClaygentSource(url=url, title=item.title))
+        merged.append(SheriffSource(url=url, title=item.title))
     return merged

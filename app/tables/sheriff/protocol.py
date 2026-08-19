@@ -2,13 +2,13 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.tables.claygent.prompts import validate_output_key
+from app.tables.sheriff.prompts import validate_output_key
 
 Confidence = Literal["high", "medium", "low"]
 OutputFieldType = Literal["text", "boolean"]
 
 
-class ClaygentOutputField(BaseModel):
+class SheriffOutputField(BaseModel):
     key: str = Field(min_length=1, max_length=64)
     type: OutputFieldType
 
@@ -18,36 +18,36 @@ class ClaygentOutputField(BaseModel):
         return validate_output_key(value)
 
 
-class ClaygentSource(BaseModel):
+class SheriffSource(BaseModel):
     url: str
     title: str = ""
 
 
-class ClaygentExpandResult(BaseModel):
+class SheriffExpandResult(BaseModel):
     enhanced_prompt: str
-    outputs: list[ClaygentOutputField] = Field(min_length=1, max_length=10)
+    outputs: list[SheriffOutputField] = Field(min_length=1, max_length=10)
 
 
-class ClaygentResearchResult(BaseModel):
+class SheriffResearchResult(BaseModel):
     output: dict[str, Any]
     confidence: Confidence
     confidence_reason: str
-    sources: list[ClaygentSource] = Field(default_factory=list)
+    sources: list[SheriffSource] = Field(default_factory=list)
     usage_cost: float | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
-class ClaygentAgent(Protocol):
+class SheriffAgent(Protocol):
     async def expand(
         self, *, goal: str, column_names: list[str]
-    ) -> ClaygentExpandResult: ...
+    ) -> SheriffExpandResult: ...
 
     async def research(
-        self, *, prompt: str, outputs: list[ClaygentOutputField]
-    ) -> ClaygentResearchResult: ...
+        self, *, prompt: str, outputs: list[SheriffOutputField]
+    ) -> SheriffResearchResult: ...
 
 
-class ClaygentUnavailableError(Exception):
+class SheriffUnavailableError(Exception):
     pass
 
 

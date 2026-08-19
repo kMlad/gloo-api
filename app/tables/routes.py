@@ -16,13 +16,13 @@ from fastapi import (
 
 from app.auth import AuthenticatedUser, require_authenticated_user
 from app.dependencies import get_table_service
-from app.tables.claygent import ClaygentUnavailableError
+from app.tables.sheriff import SheriffUnavailableError
 from app.tables.csv_import import CsvImportError
 from app.tables.schemas import (
-    ClaygentExpandRequest,
-    ClaygentExpandResponse,
-    ClaygentRunCreate,
-    ClaygentRunResponse,
+    SheriffExpandRequest,
+    SheriffExpandResponse,
+    SheriffRunCreate,
+    SheriffRunResponse,
     ColumnCreate,
     ColumnOrderUpdate,
     ColumnResponse,
@@ -63,7 +63,7 @@ def _map_table_error(error: Exception) -> HTTPException:
         return HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         )
-    if isinstance(error, ClaygentUnavailableError):
+    if isinstance(error, SheriffUnavailableError):
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
         )
@@ -164,7 +164,7 @@ async def add_column(
         TableNotFoundError,
         TableConflictError,
         TableValidationError,
-        ClaygentUnavailableError,
+        SheriffUnavailableError,
     ) as error:
         raise _map_table_error(error) from error
 
@@ -209,66 +209,66 @@ async def delete_column(
 
 
 @router.post(
-    "/{table_id}/claygent/prompts/expand",
-    response_model=ClaygentExpandResponse,
+    "/{table_id}/sheriff/prompts/expand",
+    response_model=SheriffExpandResponse,
 )
-async def expand_claygent_prompt(
+async def expand_sheriff_prompt(
     table_id: UUID,
-    payload: ClaygentExpandRequest,
+    payload: SheriffExpandRequest,
     service: ServiceDependency,
 ) -> dict[str, Any]:
     try:
-        return await service.expand_claygent_prompt(str(table_id), payload)
+        return await service.expand_sheriff_prompt(str(table_id), payload)
     except (
         TableNotFoundError,
         TableValidationError,
-        ClaygentUnavailableError,
+        SheriffUnavailableError,
     ) as error:
         raise _map_table_error(error) from error
 
 
 @router.post(
     "/{table_id}/columns/{column_id}/runs",
-    response_model=ClaygentRunResponse,
+    response_model=SheriffRunResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def start_claygent_run(
+async def start_sheriff_run(
     table_id: UUID,
     column_id: UUID,
     service: ServiceDependency,
     user: UserDependency,
     background_tasks: BackgroundTasks,
-    payload: ClaygentRunCreate | None = None,
+    payload: SheriffRunCreate | None = None,
 ) -> dict[str, Any]:
     try:
-        run = await service.start_claygent_run(
+        run = await service.start_sheriff_run(
             str(table_id),
             str(column_id),
-            payload or ClaygentRunCreate(),
+            payload or SheriffRunCreate(),
             created_by=user.id,
         )
     except (
         TableNotFoundError,
         TableValidationError,
-        ClaygentUnavailableError,
+        SheriffUnavailableError,
     ) as error:
         raise _map_table_error(error) from error
-    background_tasks.add_task(service.execute_claygent_run, str(run["id"]))
+    background_tasks.add_task(service.execute_sheriff_run, str(run["id"]))
     return run
 
 
 @router.get(
     "/{table_id}/columns/{column_id}/runs/{run_id}",
-    response_model=ClaygentRunResponse,
+    response_model=SheriffRunResponse,
 )
-async def get_claygent_run(
+async def get_sheriff_run(
     table_id: UUID,
     column_id: UUID,
     run_id: UUID,
     service: ServiceDependency,
 ) -> dict[str, Any]:
     try:
-        return await service.get_claygent_run(
+        return await service.get_sheriff_run(
             str(table_id), str(column_id), str(run_id)
         )
     except TableNotFoundError as error:

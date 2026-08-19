@@ -55,7 +55,7 @@ def interpolate_prompt(
     *,
     invalid_names: set[str] | None = None,
 ) -> str:
-    from app.tables.claygent.protocol import (
+    from app.tables.sheriff.protocol import (
         InvalidPlaceholderError,
         UnknownPlaceholderError,
     )
@@ -66,7 +66,7 @@ def interpolate_prompt(
         name = match.group(1).strip()
         if name in blocked:
             raise InvalidPlaceholderError(
-                name, f"Column {name} cannot be used as a claygent input"
+                name, f"Column {name} cannot be used as a sheriff input"
             )
         if name not in values_by_name:
             raise UnknownPlaceholderError(name)

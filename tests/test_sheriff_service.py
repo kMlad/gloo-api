@@ -3,12 +3,12 @@ from uuid import uuid4
 
 import pytest
 
-from app.tables.claygent import ClaygentUnavailableError
-from app.tables.claygent.protocol import ClaygentExpandResult, ClaygentOutputField, ClaygentResearchResult
+from app.tables.sheriff import SheriffUnavailableError
+from app.tables.sheriff.protocol import SheriffExpandResult, SheriffOutputField, SheriffResearchResult
 from app.tables.schemas import (
-    ClaygentConfig,
-    ClaygentExpandRequest,
-    ClaygentRunCreate,
+    SheriffConfig,
+    SheriffExpandRequest,
+    SheriffRunCreate,
     ColumnCreate,
     ColumnUpdate,
     RowCreate,
@@ -21,18 +21,18 @@ from app.tables.service import TableNotFoundError, TableService, TableValidation
 from tests.test_table_service import FakeTableRepository, _service
 
 
-class FakeClaygentAgent:
+class FakeSheriffAgent:
     def __init__(self) -> None:
         self.expand_calls: list[dict] = []
         self.research_calls: list[dict] = []
-        self.expand_result = ClaygentExpandResult(
+        self.expand_result = SheriffExpandResult(
             enhanced_prompt="Find the CEO of {{Company}}. Do not invent names.",
             outputs=[
-                ClaygentOutputField(key="first_name", type="text"),
-                ClaygentOutputField(key="last_name", type="text"),
+                SheriffOutputField(key="first_name", type="text"),
+                SheriffOutputField(key="last_name", type="text"),
             ],
         )
-        self.research_result = ClaygentResearchResult(
+        self.research_result = SheriffResearchResult(
             output={"first_name": "Ada", "last_name": "Lovelace"},
             confidence="high",
             confidence_reason="LinkedIn SERP headline still lists Acme",
@@ -41,24 +41,24 @@ class FakeClaygentAgent:
             raw={"output": {"first_name": "Ada", "last_name": "Lovelace"}, "usage_cost": 0.01},
         )
 
-    async def expand(self, *, goal: str, column_names: list[str]) -> ClaygentExpandResult:
+    async def expand(self, *, goal: str, column_names: list[str]) -> SheriffExpandResult:
         self.expand_calls.append({"goal": goal, "column_names": column_names})
         return self.expand_result
 
-    async def research(self, *, prompt: str, outputs: list[ClaygentOutputField]):
+    async def research(self, *, prompt: str, outputs: list[SheriffOutputField]):
         self.research_calls.append({"prompt": prompt, "outputs": outputs})
         return self.research_result
 
 
-def _claygent_payload(**overrides) -> ColumnCreate:
+def _sheriff_payload(**overrides) -> ColumnCreate:
     values = {
         "name": "CEO",
-        "type": "claygent",
-        "claygent": ClaygentConfig(
+        "type": "sheriff",
+        "sheriff": SheriffConfig(
             user_prompt="Find the CEO of {{Company}}",
             outputs=[
-                ClaygentOutputField(key="first_name", type="text"),
-                ClaygentOutputField(key="last_name", type="text"),
+                SheriffOutputField(key="first_name", type="text"),
+                SheriffOutputField(key="last_name", type="text"),
             ],
         ),
     }
@@ -68,24 +68,24 @@ def _claygent_payload(**overrides) -> ColumnCreate:
 
 @pytest.mark.asyncio
 async def test_expand_returns_schema_and_rejects_unknown_placeholders() -> None:
-    agent = FakeClaygentAgent()
+    agent = FakeSheriffAgent()
     service, _repository = _service(agent)
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    expanded = await service.expand_claygent_prompt(
+    expanded = await service.expand_sheriff_prompt(
         table["id"],
-        ClaygentExpandRequest(goal="Find the CEO of {{Company}}"),
+        SheriffExpandRequest(goal="Find the CEO of {{Company}}"),
     )
     assert expanded["enhanced_prompt"] == agent.expand_result.enhanced_prompt
     assert [item["key"] for item in expanded["outputs"]] == ["first_name", "last_name"]
     assert expanded["input_columns"][0]["name"] == "Company"
 
     with pytest.raises(TableValidationError, match="Unknown column placeholder"):
-        await service.expand_claygent_prompt(
+        await service.expand_sheriff_prompt(
             table["id"],
-            ClaygentExpandRequest(goal="Find the CEO of {{Nope}}"),
+            SheriffExpandRequest(goal="Find the CEO of {{Nope}}"),
         )
 
 
@@ -96,25 +96,25 @@ async def test_expand_without_agent_returns_unavailable() -> None:
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    with pytest.raises(ClaygentUnavailableError):
-        await service.expand_claygent_prompt(
+    with pytest.raises(SheriffUnavailableError):
+        await service.expand_sheriff_prompt(
             table["id"],
-            ClaygentExpandRequest(goal="Find the CEO of {{Company}}"),
+            SheriffExpandRequest(goal="Find the CEO of {{Company}}"),
         )
 
 
 @pytest.mark.asyncio
-async def test_create_claygent_column_inserts_child_columns() -> None:
+async def test_create_sheriff_column_inserts_child_columns() -> None:
     service, _repository = _service()
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     names = [column["name"] for column in created["columns"]]
     assert names == ["Company", "CEO", "First name", "Last name"]
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    assert parent["type"] == "claygent"
+    assert parent["type"] == "sheriff"
     assert parent["config"]["user_prompt"] == "Find the CEO of {{Company}}"
     children = [
         column
@@ -127,7 +127,7 @@ async def test_create_claygent_column_inserts_child_columns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_claygent_column_requires_existing_placeholders() -> None:
+async def test_create_sheriff_column_requires_existing_placeholders() -> None:
     service, _repository = _service()
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
@@ -136,10 +136,10 @@ async def test_create_claygent_column_requires_existing_placeholders() -> None:
     with pytest.raises(TableValidationError, match="Unknown column placeholder"):
         await service.add_column(
             table["id"],
-            _claygent_payload(
-                claygent=ClaygentConfig(
+            _sheriff_payload(
+                sheriff=SheriffConfig(
                     user_prompt="Find the CEO of {{Missing}}",
-                    outputs=[ClaygentOutputField(key="first_name", type="text")],
+                    outputs=[SheriffOutputField(key="first_name", type="text")],
                 )
             ),
         )
@@ -147,7 +147,7 @@ async def test_create_claygent_column_requires_existing_placeholders() -> None:
 
 @pytest.mark.asyncio
 async def test_run_writes_parent_json_and_child_cells() -> None:
-    agent = FakeClaygentAgent()
+    agent = FakeSheriffAgent()
     service, repository = _service(agent)
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
@@ -155,23 +155,23 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     )
     company_id = table["columns"][0]["id"]
     row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     first = next(column for column in created["columns"] if column["source_field"] == "first_name")
     last = next(column for column in created["columns"] if column["source_field"] == "last_name")
 
-    run = await service.start_claygent_run(
+    run = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(row_ids=[row["id"]]),
+        SheriffRunCreate(row_ids=[row["id"]]),
         created_by=str(uuid4()),
     )
     assert run["status"] == "queued"
     assert run["items"][0]["status"] == "queued"
     pending = await service.list_rows(table["id"], limit=100, offset=0)
     assert pending["items"][0]["values"][str(parent["id"])]["status"] == "queued"
-    await service.execute_claygent_run(run["id"])
-    finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    await service.execute_sheriff_run(run["id"])
+    finished = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
     assert finished["status"] == "succeeded"
     assert finished["succeeded_count"] == 1
     assert agent.research_calls[0]["prompt"] == "Find the CEO of Acme"
@@ -190,20 +190,20 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
 
 @pytest.mark.asyncio
 async def test_run_stays_queued_until_a_worker_starts() -> None:
-    class GatedAgent(FakeClaygentAgent):
+    class GatedAgent(FakeSheriffAgent):
         def __init__(self) -> None:
             super().__init__()
             self.entered = asyncio.Event()
             self.gate = asyncio.Event()
 
-        async def research(self, *, prompt: str, outputs: list[ClaygentOutputField]):
+        async def research(self, *, prompt: str, outputs: list[SheriffOutputField]):
             self.entered.set()
             await self.gate.wait()
             return await super().research(prompt=prompt, outputs=outputs)
 
     agent = GatedAgent()
     service = TableService(
-        FakeTableRepository(), claygent_agent=agent, claygent_concurrency=1
+        FakeTableRepository(), sheriff_agent=agent, sheriff_concurrency=1
     )
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
@@ -214,22 +214,22 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
     second_row = await service.add_row(
         table["id"], RowCreate(values={company_id: "Globex"})
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     parent_id = str(parent["id"])
 
-    run = await service.start_claygent_run(
+    run = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(row_ids=[first_row["id"], second_row["id"]]),
+        SheriffRunCreate(row_ids=[first_row["id"], second_row["id"]]),
         created_by=str(uuid4()),
     )
     assert run["status"] == "queued"
     assert {item["status"] for item in run["items"]} == {"queued"}
 
-    task = asyncio.create_task(service.execute_claygent_run(run["id"]))
+    task = asyncio.create_task(service.execute_sheriff_run(run["id"]))
     await agent.entered.wait()
-    in_progress = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    in_progress = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
     assert in_progress["status"] == "running"
     assert {item["status"] for item in in_progress["items"]} == {"queued", "running"}
     listed = await service.list_rows(table["id"], limit=100, offset=0)
@@ -240,42 +240,42 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
 
     agent.gate.set()
     await task
-    finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    finished = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
     assert finished["status"] == "succeeded"
     assert {item["status"] for item in finished["items"]} == {"succeeded"}
 
 
 @pytest.mark.asyncio
 async def test_queued_items_fail_when_execute_cannot_start() -> None:
-    service, _repository = _service(FakeClaygentAgent())
+    service, _repository = _service(FakeSheriffAgent())
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
     company_id = table["columns"][0]["id"]
     row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    run = await service.start_claygent_run(
+    run = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(row_ids=[row["id"]]),
+        SheriffRunCreate(row_ids=[row["id"]]),
         created_by=str(uuid4()),
     )
     service._agent = None
-    await service.execute_claygent_run(run["id"])
-    finished = await service.get_claygent_run(table["id"], parent["id"], run["id"])
+    await service.execute_sheriff_run(run["id"])
+    finished = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
     assert finished["status"] == "failed"
     assert finished["items"][0]["status"] == "failed"
     listed = await service.list_rows(table["id"], limit=100, offset=0)
     cell = listed["items"][0]["values"][str(parent["id"])]
     assert cell["status"] == "failed"
-    assert cell["error"] == "Claygent is not configured"
+    assert cell["error"] == "Sheriff is not configured"
 
 
 @pytest.mark.asyncio
 async def test_run_selected_all_and_overwrite_skip() -> None:
-    agent = FakeClaygentAgent()
+    agent = FakeSheriffAgent()
     service, _repository = _service(agent)
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
@@ -284,37 +284,37 @@ async def test_run_selected_all_and_overwrite_skip() -> None:
     company_id = table["columns"][0]["id"]
     first_row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
     second_row = await service.add_row(table["id"], RowCreate(values={company_id: "Globex"}))
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
 
-    selected = await service.start_claygent_run(
+    selected = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(row_ids=[first_row["id"]]),
+        SheriffRunCreate(row_ids=[first_row["id"]]),
         created_by=str(uuid4()),
     )
-    await service.execute_claygent_run(selected["id"])
+    await service.execute_sheriff_run(selected["id"])
     assert len(agent.research_calls) == 1
 
-    skipped = await service.start_claygent_run(
+    skipped = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(),
+        SheriffRunCreate(),
         created_by=str(uuid4()),
     )
-    await service.execute_claygent_run(skipped["id"])
-    finished = await service.get_claygent_run(table["id"], parent["id"], skipped["id"])
+    await service.execute_sheriff_run(skipped["id"])
+    finished = await service.get_sheriff_run(table["id"], parent["id"], skipped["id"])
     assert finished["skipped_count"] == 1
     assert finished["succeeded_count"] == 1
     assert len(agent.research_calls) == 2
 
-    overwrite = await service.start_claygent_run(
+    overwrite = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(overwrite=True),
+        SheriffRunCreate(overwrite=True),
         created_by=str(uuid4()),
     )
-    await service.execute_claygent_run(overwrite["id"])
+    await service.execute_sheriff_run(overwrite["id"])
     assert len(agent.research_calls) == 4
     assert {str(first_row["id"]), str(second_row["id"])} == {
         item["row_id"] for item in overwrite["items"]
@@ -328,21 +328,21 @@ async def test_run_without_agent_is_unavailable() -> None:
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     await service.add_row(table["id"], RowCreate())
-    with pytest.raises(ClaygentUnavailableError):
-        await service.start_claygent_run(
+    with pytest.raises(SheriffUnavailableError):
+        await service.start_sheriff_run(
             table["id"],
             parent["id"],
-            ClaygentRunCreate(),
+            SheriffRunCreate(),
             created_by=str(uuid4()),
         )
 
 
 @pytest.mark.asyncio
 async def test_delete_parent_removes_children_and_cell_keys() -> None:
-    service, repository = _service(FakeClaygentAgent())
+    service, repository = _service(FakeSheriffAgent())
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
@@ -351,16 +351,16 @@ async def test_delete_parent_removes_children_and_cell_keys() -> None:
     row = await service.add_row(
         table["id"], RowCreate(values={table["columns"][0]["id"]: "Acme"})
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     first = next(column for column in created["columns"] if column["source_field"] == "first_name")
-    run = await service.start_claygent_run(
+    run = await service.start_sheriff_run(
         table["id"],
         parent["id"],
-        ClaygentRunCreate(row_ids=[row["id"]]),
+        SheriffRunCreate(row_ids=[row["id"]]),
         created_by=str(uuid4()),
     )
-    await service.execute_claygent_run(run["id"])
+    await service.execute_sheriff_run(run["id"])
     await service.delete_column(table["id"], parent["id"])
     remaining = await service.get_table(table["id"])
     assert [column["name"] for column in remaining["columns"]] == ["Company"]
@@ -378,7 +378,7 @@ async def test_patch_parent_cell_rejected_child_allowed() -> None:
         created_by=str(uuid4()),
     )
     row = await service.add_row(table["id"], RowCreate())
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     first = next(column for column in created["columns"] if column["source_field"] == "first_name")
     with pytest.raises(TableValidationError, match="cannot be patched"):
@@ -396,22 +396,22 @@ async def test_patch_parent_cell_rejected_child_allowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_patch_claygent_adds_new_output_columns_without_deleting() -> None:
+async def test_patch_sheriff_adds_new_output_columns_without_deleting() -> None:
     service, _repository = _service()
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     updated = await service.update_column(
         table["id"],
         parent["id"],
         ColumnUpdate(
-            claygent=ClaygentConfig(
+            sheriff=SheriffConfig(
                 user_prompt="Find the CEO of {{Company}}",
                 outputs=[
-                    ClaygentOutputField(key="linkedin_url", type="text"),
+                    SheriffOutputField(key="linkedin_url", type="text"),
                 ],
             )
         ),
@@ -423,13 +423,13 @@ async def test_patch_claygent_adds_new_output_columns_without_deleting() -> None
 
 
 @pytest.mark.asyncio
-async def test_claygent_parent_only_supports_is_empty_filter() -> None:
+async def test_sheriff_parent_only_supports_is_empty_filter() -> None:
     service, _repository = _service()
     table = await service.create_table(
         TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
         created_by=str(uuid4()),
     )
-    created = await service.add_column(table["id"], _claygent_payload())
+    created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     with pytest.raises(TableValidationError, match="is_empty"):
         await service.replace_filters(
@@ -448,4 +448,4 @@ async def test_get_missing_run() -> None:
         created_by=str(uuid4()),
     )
     with pytest.raises(TableNotFoundError):
-        await service.get_claygent_run(table["id"], str(uuid4()), str(uuid4()))
+        await service.get_sheriff_run(table["id"], str(uuid4()), str(uuid4()))

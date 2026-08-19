@@ -240,13 +240,13 @@ class FakeTableRepository:
         for row_id, values in updates:
             await self.update_row_values(row_id, values)
 
-    async def insert_claygent_run(self, record: dict) -> dict:
+    async def insert_sheriff_run(self, record: dict) -> dict:
         run_id = record.get("id") or str(uuid4())
         stored = {**record, "id": run_id}
         self.runs[run_id] = stored
         return deepcopy(stored)
 
-    async def update_claygent_run(self, run_id: str, values: dict) -> dict | None:
+    async def update_sheriff_run(self, run_id: str, values: dict) -> dict | None:
         run = self.runs.get(run_id)
         if run is None:
             return None
@@ -254,7 +254,7 @@ class FakeTableRepository:
         run["updated_at"] = _now()
         return deepcopy(run)
 
-    async def get_claygent_run(
+    async def get_sheriff_run(
         self, table_id: str, column_id: str, run_id: str
     ) -> dict | None:
         run = self.runs.get(run_id)
@@ -264,11 +264,11 @@ class FakeTableRepository:
             return None
         return deepcopy(run)
 
-    async def get_claygent_run_by_id(self, run_id: str) -> dict | None:
+    async def get_sheriff_run_by_id(self, run_id: str) -> dict | None:
         run = self.runs.get(run_id)
         return deepcopy(run) if run else None
 
-    async def insert_claygent_run_items(self, items: list[dict]) -> list[dict]:
+    async def insert_sheriff_run_items(self, items: list[dict]) -> list[dict]:
         inserted = []
         for item in items:
             item_id = item.get("id") or str(uuid4())
@@ -277,7 +277,7 @@ class FakeTableRepository:
             inserted.append(deepcopy(stored))
         return inserted
 
-    async def list_claygent_run_items(self, run_id: str) -> list[dict]:
+    async def list_sheriff_run_items(self, run_id: str) -> list[dict]:
         items = [
             deepcopy(item)
             for item in self.run_items.values()
@@ -285,7 +285,7 @@ class FakeTableRepository:
         ]
         return sorted(items, key=lambda item: (item["created_at"], item["id"]))
 
-    async def update_claygent_run_item(self, item_id: str, values: dict) -> dict | None:
+    async def update_sheriff_run_item(self, item_id: str, values: dict) -> dict | None:
         item = self.run_items.get(item_id)
         if item is None:
             return None
@@ -313,7 +313,7 @@ class FakeTableRepository:
 
 def _service(agent=None) -> tuple[TableService, FakeTableRepository]:
     repository = FakeTableRepository()
-    return TableService(repository, claygent_agent=agent), repository
+    return TableService(repository, sheriff_agent=agent), repository
 
 
 @pytest.mark.asyncio

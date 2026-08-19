@@ -124,8 +124,8 @@ via Supabase's invite confirmation flow.
 
 Workbook-style tables are independent of CRM leads. Any signed-in user can
 create, import, and edit them. Column types are `text`, `boolean`, or
-`claygent`. Empty `text`/`boolean` columns start blank; missing cells are
-returned as `null`. Claygent columns are a reusable research prompt that writes
+`sheriff`. Empty `text`/`boolean` columns start blank; missing cells are
+returned as `null`. Sheriff columns are a reusable research prompt that writes
 typed fields back into auto-created child columns.
 
 Create an empty table:
@@ -162,18 +162,18 @@ Saved filters are applied on row reads. Replace them with
 `PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
 `PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
 Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
-patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Claygent columns
+patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff columns
 are not allowed on table create or CSV import — add them after input columns
 exist.
 
 Optional prompt helper (nothing is persisted):
 
 ```text
-POST /api/v1/tables/{table_id}/claygent/prompts/expand
+POST /api/v1/tables/{table_id}/sheriff/prompts/expand
 {"goal": "Find the CEO of {{Company}}", "column_ids": []}
 ```
 
-Create a claygent column with a user prompt and output fields (`text` or
+Create a sheriff column with a user prompt and output fields (`text` or
 `boolean`, max 10). Expanding the prompt is optional; if `enhanced_prompt` is
 omitted, runs interpolate `user_prompt`. The response is the full table,
 including auto-created child columns (`first_name` → `First name`).
@@ -184,8 +184,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
   -H "Content-Type: application/json" \
   -d '{
     "name": "CEO",
-    "type": "claygent",
-    "claygent": {
+    "type": "sheriff",
+    "sheriff": {
       "user_prompt": "Find the CEO of {{Company}}",
       "outputs": [
         {"key": "first_name", "type": "text"},
@@ -198,7 +198,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
 Run one row, selected rows, or the whole table (omit `row_ids`). Max 100 rows
 per run. Returns **202** with the run and items in `queued` status. Parent
 cells start as `queued`, then flip to `running` when a worker picks them up
-(`CLAYGENT_CONCURRENCY`, default 3). Poll
+(`SHERIFF_CONCURRENCY`, default 3). Poll
 `GET /api/v1/tables/{table_id}/columns/{column_id}/runs/{run_id}`.
 
 ```text
@@ -206,7 +206,7 @@ POST /api/v1/tables/{table_id}/columns/{column_id}/runs
 {"row_ids": ["..."], "overwrite": false}
 ```
 
-`overwrite: false` (default) skips rows whose claygent cell `status` is
+`overwrite: false` (default) skips rows whose sheriff cell `status` is
 `succeeded`. Parent cells are computed JSON and cannot be patched; child cells
 can. A succeeded cell looks like:
 
@@ -221,10 +221,10 @@ can. A succeeded cell looks like:
 }
 ```
 
-Claygent uses the Perplexity Agent API (`web_search` only) with
+Sheriff uses the Perplexity Agent API (`web_search` only) with
 `PERPLEXITY_API_KEY`. Perplexity Pro/Max app plans do not include API access.
-Expand/run without a key returns 503. Optional tuning: `CLAYGENT_MODEL`
-(default `openai/gpt-5.4-mini`), `CLAYGENT_TIMEOUT_SECONDS`,
-`CLAYGENT_CONCURRENCY`.
+Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
+(default `openai/gpt-5.4-mini`), `SHERIFF_TIMEOUT_SECONDS`,
+`SHERIFF_CONCURRENCY`.
 
 

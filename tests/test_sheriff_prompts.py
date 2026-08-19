@@ -1,14 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from app.tables.claygent.prompts import (
+from app.tables.sheriff.prompts import (
     display_name_for_key,
     interpolate_prompt,
     placeholder_names,
     unique_child_name,
 )
-from app.tables.claygent.protocol import UnknownPlaceholderError
-from app.tables.schemas import ClaygentConfig, ClaygentOutputField, ColumnCreate, TableCreate
+from app.tables.sheriff.protocol import UnknownPlaceholderError
+from app.tables.schemas import SheriffConfig, SheriffOutputField, ColumnCreate, TableCreate
 
 
 def test_placeholder_interpolation_and_child_names() -> None:
@@ -23,16 +23,16 @@ def test_placeholder_interpolation_and_child_names() -> None:
     assert unique_child_name("CEO", "first_name", taken) == "CEO first name 2"
 
 
-def test_column_create_requires_claygent_config() -> None:
-    with pytest.raises(ValidationError, match="claygent"):
-        ColumnCreate(name="CEO", type="claygent")
+def test_column_create_requires_sheriff_config() -> None:
+    with pytest.raises(ValidationError, match="sheriff"):
+        ColumnCreate(name="CEO", type="sheriff")
     with pytest.raises(ValidationError, match="only valid"):
         ColumnCreate(
             name="Company",
             type="text",
-            claygent=ClaygentConfig(
+            sheriff=SheriffConfig(
                 user_prompt="Find X",
-                outputs=[ClaygentOutputField(key="first_name", type="text")],
+                outputs=[SheriffOutputField(key="first_name", type="text")],
             ),
         )
     with pytest.raises(ValidationError, match="after the table exists"):
@@ -41,13 +41,13 @@ def test_column_create_requires_claygent_config() -> None:
             columns=[
                 ColumnCreate(
                     name="CEO",
-                    type="claygent",
-                    claygent=ClaygentConfig(
+                    type="sheriff",
+                    sheriff=SheriffConfig(
                         user_prompt="Find X",
-                        outputs=[ClaygentOutputField(key="first_name", type="text")],
+                        outputs=[SheriffOutputField(key="first_name", type="text")],
                     ),
                 )
             ],
         )
     with pytest.raises(ValidationError, match="snake_case"):
-        ClaygentOutputField(key="First Name", type="text")
+        SheriffOutputField(key="First Name", type="text")

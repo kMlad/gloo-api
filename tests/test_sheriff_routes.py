@@ -11,7 +11,7 @@ from app.dependencies import get_table_service
 from app.env import Env, get_env
 from app.main import create_app
 from app.supabase_client import get_supabase
-from app.tables.claygent import ClaygentUnavailableError
+from app.tables.sheriff import SheriffUnavailableError
 from app.tables.service import TableNotFoundError, TableService, TableValidationError
 
 
@@ -57,7 +57,7 @@ class SupabaseStub:
         self.auth = AuthStub(current_user=_user())
 
 
-class ClaygentServiceStub:
+class SheriffServiceStub:
     def __init__(self) -> None:
         self.executed: list[str] = []
         self.fail_unavailable = False
@@ -66,9 +66,9 @@ class ClaygentServiceStub:
         self.column_id = str(uuid4())
         self.table_id = str(uuid4())
 
-    async def expand_claygent_prompt(self, table_id: str, payload) -> dict[str, Any]:
+    async def expand_sheriff_prompt(self, table_id: str, payload) -> dict[str, Any]:
         if self.fail_unavailable:
-            raise ClaygentUnavailableError("Claygent is not configured")
+            raise SheriffUnavailableError("Sheriff is not configured")
         if self.fail_validation:
             raise TableValidationError(self.fail_validation)
         return {
@@ -78,11 +78,11 @@ class ClaygentServiceStub:
             "input_columns": [{"id": str(uuid4()), "name": "Company"}],
         }
 
-    async def start_claygent_run(
+    async def start_sheriff_run(
         self, table_id, column_id, payload, *, created_by: str
     ) -> dict[str, Any]:
         if self.fail_unavailable:
-            raise ClaygentUnavailableError("Claygent is not configured")
+            raise SheriffUnavailableError("Sheriff is not configured")
         now = datetime.now(UTC).isoformat()
         return {
             "id": self.run_id,
@@ -112,10 +112,10 @@ class ClaygentServiceStub:
             "completed_at": None,
         }
 
-    async def execute_claygent_run(self, run_id: str) -> None:
+    async def execute_sheriff_run(self, run_id: str) -> None:
         self.executed.append(run_id)
 
-    async def get_claygent_run(self, table_id, column_id, run_id) -> dict[str, Any]:
+    async def get_sheriff_run(self, table_id, column_id, run_id) -> dict[str, Any]:
         if run_id != self.run_id:
             raise TableNotFoundError("Run not found")
         now = datetime.now(UTC).isoformat()
@@ -138,7 +138,7 @@ class ClaygentServiceStub:
         }
 
 
-def _app(service: ClaygentServiceStub | TableService) -> Any:
+def _app(service: SheriffServiceStub | TableService) -> Any:
     application = create_app(use_lifespan=False)
     application.dependency_overrides[get_env] = _env
     application.dependency_overrides[get_supabase] = lambda: SupabaseStub()
@@ -152,7 +152,7 @@ def _headers() -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_expand_and_run_routes() -> None:
-    service = ClaygentServiceStub()
+    service = SheriffServiceStub()
     app = _app(service)
     table_id = uuid4()
     column_id = uuid4()
@@ -161,7 +161,7 @@ async def test_expand_and_run_routes() -> None:
         transport=transport, base_url="http://testserver"
     ) as client:
         expanded = await client.post(
-            f"/api/v1/tables/{table_id}/claygent/prompts/expand",
+            f"/api/v1/tables/{table_id}/sheriff/prompts/expand",
             headers=_headers(),
             json={"goal": "Find the CEO of {{Company}}"},
         )
@@ -189,7 +189,7 @@ async def test_expand_and_run_routes() -> None:
 
 @pytest.mark.asyncio
 async def test_expand_unknown_placeholder_and_missing_key() -> None:
-    service = ClaygentServiceStub()
+    service = SheriffServiceStub()
     app = _app(service)
     table_id = uuid4()
     transport = httpx.ASGITransport(app=app)
@@ -198,7 +198,7 @@ async def test_expand_unknown_placeholder_and_missing_key() -> None:
     ) as client:
         service.fail_validation = "Unknown column placeholder {{Nope}}"
         unknown = await client.post(
-            f"/api/v1/tables/{table_id}/claygent/prompts/expand",
+            f"/api/v1/tables/{table_id}/sheriff/prompts/expand",
             headers=_headers(),
             json={"goal": "Find {{Nope}}"},
         )
@@ -207,7 +207,7 @@ async def test_expand_unknown_placeholder_and_missing_key() -> None:
         service.fail_validation = None
         service.fail_unavailable = True
         missing = await client.post(
-            f"/api/v1/tables/{table_id}/claygent/prompts/expand",
+            f"/api/v1/tables/{table_id}/sheriff/prompts/expand",
             headers=_headers(),
             json={"goal": "Find {{Company}}"},
         )

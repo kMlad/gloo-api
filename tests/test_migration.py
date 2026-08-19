@@ -126,3 +126,17 @@ def test_claygent_queued_status_migration_widens_run_checks() -> None:
         "status in ('queued', 'running', 'succeeded', 'failed', 'skipped')"
         in migration
     )
+
+
+def test_sheriff_rename_migration_updates_type_and_tables() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_rename_claygent_to_sheriff.sql")
+    ).read_text()
+    assert "set type = 'sheriff'" in migration
+    assert "where type = 'claygent'" in migration
+    assert "check (type in ('text', 'boolean', 'sheriff'))" in migration
+    assert "table_columns_sheriff_config_check" in migration
+    assert "rename to table_sheriff_runs" in migration
+    assert "rename to table_sheriff_run_items" in migration
+    assert "table_sheriff_runs_table_id_idx" in migration
+    assert "replace(rec.conname, 'claygent', 'sheriff')" in migration

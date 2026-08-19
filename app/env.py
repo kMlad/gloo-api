@@ -54,9 +54,9 @@ class Env(BaseSettings):
     phone_enrichment_concurrency: int = Field(default=5, ge=1, le=20)
     phone_enrichment_reconcile_seconds: int = Field(default=300, ge=300, le=3600)
     perplexity_api_key: SecretStr | None = None
-    claygent_model: str = "openai/gpt-5.4-mini"
-    claygent_timeout_seconds: float = Field(default=60.0, gt=0)
-    claygent_concurrency: int = Field(default=3, ge=1, le=20)
+    sheriff_model: str = "openai/gpt-5.4-mini"
+    sheriff_timeout_seconds: float = Field(default=60.0, gt=0)
+    sheriff_concurrency: int = Field(default=3, ge=1, le=20)
 
     @field_validator("perplexity_api_key", mode="before")
     @classmethod

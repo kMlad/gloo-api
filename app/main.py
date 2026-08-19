@@ -27,7 +27,7 @@ from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
-from app.tables.claygent.perplexity import PerplexityClaygentAgent
+from app.tables.sheriff.perplexity import PerplexitySheriffAgent
 from app.tables.repository import TableRepository
 from app.tables.routes import router as tables_router
 from app.tables.service import TableService
@@ -73,21 +73,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.supabase = supabase
     app.state.repository = Repository(supabase)
-    claygent_agent = None
+    sheriff_agent = None
     perplexity_client = None
     if env.perplexity_api_key is not None:
         perplexity_client = AsyncPerplexity(
             api_key=env.perplexity_api_key.get_secret_value(),
-            timeout=env.claygent_timeout_seconds,
+            timeout=env.sheriff_timeout_seconds,
         )
-        claygent_agent = PerplexityClaygentAgent(
+        sheriff_agent = PerplexitySheriffAgent(
             perplexity_client,
-            model=env.claygent_model,
+            model=env.sheriff_model,
         )
     app.state.table_service = TableService(
         TableRepository(supabase),
-        claygent_agent=claygent_agent,
-        claygent_concurrency=env.claygent_concurrency,
+        sheriff_agent=sheriff_agent,
+        sheriff_concurrency=env.sheriff_concurrency,
     )
     app.state.smartlead = SmartLeadClient(
         smartlead_http,

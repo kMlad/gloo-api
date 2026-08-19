@@ -4,13 +4,13 @@ from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError
 
-from app.tables.claygent import (
-    ClaygentAgent,
-    ClaygentUnavailableError,
+from app.tables.sheriff import (
+    SheriffAgent,
+    SheriffUnavailableError,
     InvalidPlaceholderError,
     UnknownPlaceholderError,
 )
-from app.tables.claygent.prompts import (
+from app.tables.sheriff.prompts import (
     interpolate_prompt,
     is_not_found,
     placeholder_names,
@@ -20,10 +20,10 @@ from app.tables.claygent.prompts import (
 from app.tables.csv_import import parse_csv, table_name_from_filename
 from app.tables.repository import TableRepository, is_unique_violation
 from app.tables.schemas import (
-    ClaygentConfig,
-    ClaygentExpandRequest,
-    ClaygentOutputField,
-    ClaygentRunCreate,
+    SheriffConfig,
+    SheriffExpandRequest,
+    SheriffOutputField,
+    SheriffRunCreate,
     ColumnCreate,
     ColumnUpdate,
     RowCreate,
@@ -36,7 +36,7 @@ from app.tables.schemas import (
 from app.utils import to_iso, utc_now
 
 _POSITION_OFFSET = 10_000
-_MAX_CLAYGENT_RUN_ROWS = 100
+_MAX_SHERIFF_RUN_ROWS = 100
 
 
 class TableNotFoundError(Exception):
@@ -56,12 +56,12 @@ class TableService:
         self,
         repository: TableRepository,
         *,
-        claygent_agent: ClaygentAgent | None = None,
-        claygent_concurrency: int = 3,
+        sheriff_agent: SheriffAgent | None = None,
+        sheriff_concurrency: int = 3,
     ) -> None:
         self._repository = repository
-        self._agent = claygent_agent
-        self._concurrency = claygent_concurrency
+        self._agent = sheriff_agent
+        self._concurrency = sheriff_concurrency
 
     async def list_tables(self) -> dict[str, Any]:
         items = await self._repository.list_tables()
@@ -157,8 +157,8 @@ class TableService:
         if max_position is not None:
             next_position = max_position + 1
         now = to_iso(utc_now())
-        if payload.type == "claygent":
-            return await self._add_claygent_column(
+        if payload.type == "sheriff":
+            return await self._add_sheriff_column(
                 table_id, payload, columns, next_position, now
             )
         try:
@@ -189,15 +189,15 @@ class TableService:
             _ensure_unique_column_name(payload.name, columns, ignore_id=column_id)
         config = None
         added_children = False
-        if payload.claygent is not None:
-            if column["type"] != "claygent":
+        if payload.sheriff is not None:
+            if column["type"] != "sheriff":
                 raise TableValidationError(
-                    "claygent config is only valid on claygent columns"
+                    "sheriff config is only valid on sheriff columns"
                 )
-            config, added_children = await self._sync_claygent_outputs(
+            config, added_children = await self._sync_sheriff_outputs(
                 table_id,
                 column,
-                payload.claygent,
+                payload.sheriff,
                 columns,
                 parent_name=payload.name or column["name"],
             )
@@ -329,8 +329,8 @@ class TableService:
         await self._repository.delete_row(row_id)
         await self._repository.update_table(table_id)
 
-    async def expand_claygent_prompt(
-        self, table_id: str, payload: ClaygentExpandRequest
+    async def expand_sheriff_prompt(
+        self, table_id: str, payload: SheriffExpandRequest
     ) -> dict[str, Any]:
         columns = await self._require_columns(table_id)
         input_columns = _resolve_input_columns(
@@ -342,7 +342,7 @@ class TableService:
             column_names=[
                 str(column["name"])
                 for column in columns
-                if column["type"] != "claygent"
+                if column["type"] != "sheriff"
             ],
         )
         return {
@@ -355,23 +355,23 @@ class TableService:
             ],
         }
 
-    async def start_claygent_run(
+    async def start_sheriff_run(
         self,
         table_id: str,
         column_id: str,
-        payload: ClaygentRunCreate,
+        payload: SheriffRunCreate,
         *,
         created_by: str,
     ) -> dict[str, Any]:
         columns = await self._require_columns(table_id)
         column = _column_by_id(columns, column_id)
-        if column["type"] != "claygent":
-            raise TableValidationError("Runs are only supported on claygent columns")
+        if column["type"] != "sheriff":
+            raise TableValidationError("Runs are only supported on sheriff columns")
         self._require_agent()
         rows = await self._repository.list_rows(table_id)
         selected = _select_run_rows(rows, payload.row_ids)
         now = to_iso(utc_now())
-        run = await self._repository.insert_claygent_run(
+        run = await self._repository.insert_sheriff_run(
             {
                 "table_id": table_id,
                 "column_id": column_id,
@@ -408,7 +408,7 @@ class TableService:
             if skip:
                 skipped += 1
             else:
-                values[column_id] = _claygent_cell(status="queued")
+                values[column_id] = _sheriff_cell(status="queued")
                 cell_updates.append((row_id, values))
             items.append(
                 {
@@ -420,27 +420,27 @@ class TableService:
                 }
             )
         if items:
-            await self._repository.insert_claygent_run_items(items)
+            await self._repository.insert_sheriff_run_items(items)
         if cell_updates:
             await self._repository.replace_row_values(cell_updates)
-        await self._repository.update_claygent_run(
+        await self._repository.update_sheriff_run(
             run_id, {"skipped_count": skipped, "total_count": len(selected)}
         )
         await self._repository.update_table(table_id)
-        return await self.get_claygent_run(table_id, column_id, run_id)
+        return await self.get_sheriff_run(table_id, column_id, run_id)
 
-    async def execute_claygent_run(self, run_id: str) -> None:
-        run = await self._repository.get_claygent_run_by_id(run_id)
+    async def execute_sheriff_run(self, run_id: str) -> None:
+        run = await self._repository.get_sheriff_run_by_id(run_id)
         if run is None:
             return
         table_id = str(run["table_id"])
         column_id = str(run["column_id"])
-        await self._repository.update_claygent_run(run_id, {"status": "running"})
+        await self._repository.update_sheriff_run(run_id, {"status": "running"})
         try:
             columns = await self._require_columns(table_id)
             column = _column_by_id(columns, column_id)
             agent = self._require_agent()
-            config = _parse_claygent_config(column.get("config"))
+            config = _parse_sheriff_config(column.get("config"))
             prompt = config.enhanced_prompt or config.user_prompt
             children = {
                 str(item.get("source_field") or ""): item
@@ -451,14 +451,14 @@ class TableService:
                 str(row["id"]): row
                 for row in await self._repository.list_rows(table_id)
             }
-            items = await self._repository.list_claygent_run_items(run_id)
+            items = await self._repository.list_sheriff_run_items(run_id)
             semaphore = asyncio.Semaphore(self._concurrency)
 
             async def process(item: dict[str, Any]) -> None:
                 if item["status"] == "skipped":
                     return
                 async with semaphore:
-                    await self._execute_claygent_item(
+                    await self._execute_sheriff_item(
                         agent=agent,
                         table_id=table_id,
                         column=column,
@@ -478,25 +478,25 @@ class TableService:
                 table_id=table_id,
                 column_id=column_id,
             )
-        await self._finalize_claygent_run(run_id)
+        await self._finalize_sheriff_run(run_id)
         await self._repository.update_table(table_id)
 
-    async def get_claygent_run(
+    async def get_sheriff_run(
         self, table_id: str, column_id: str, run_id: str
     ) -> dict[str, Any]:
         await self._require_table(table_id)
-        run = await self._repository.get_claygent_run(table_id, column_id, run_id)
+        run = await self._repository.get_sheriff_run(table_id, column_id, run_id)
         if run is None:
             raise TableNotFoundError("Run not found")
-        items = await self._repository.list_claygent_run_items(run_id)
+        items = await self._repository.list_sheriff_run_items(run_id)
         return {**run, "items": items}
 
-    def _require_agent(self) -> ClaygentAgent:
+    def _require_agent(self) -> SheriffAgent:
         if self._agent is None:
-            raise ClaygentUnavailableError("Claygent is not configured")
+            raise SheriffUnavailableError("Sheriff is not configured")
         return self._agent
 
-    async def _add_claygent_column(
+    async def _add_sheriff_column(
         self,
         table_id: str,
         payload: ColumnCreate,
@@ -504,19 +504,19 @@ class TableService:
         next_position: int,
         now: str,
     ) -> dict[str, Any]:
-        assert payload.claygent is not None
+        assert payload.sheriff is not None
         _resolve_input_columns(
-            payload.claygent.enhanced_prompt or payload.claygent.user_prompt,
+            payload.sheriff.enhanced_prompt or payload.sheriff.user_prompt,
             columns,
         )
-        config = _claygent_config_record(payload.claygent, columns)
+        config = _sheriff_config_record(payload.sheriff, columns)
         parent_id = str(uuid4())
         records: list[dict[str, Any]] = [
             {
                 "id": parent_id,
                 "table_id": table_id,
                 "name": payload.name,
-                "type": "claygent",
+                "type": "sheriff",
                 "position": next_position,
                 "hidden": False,
                 "config": config,
@@ -526,11 +526,11 @@ class TableService:
         ]
         taken = {str(column["name"]) for column in columns}
         taken.add(payload.name)
-        for index, field in enumerate(payload.claygent.outputs):
+        for index, field in enumerate(payload.sheriff.outputs):
             child_name = unique_child_name(payload.name, field.key, taken)
             taken.add(child_name)
             records.append(
-                _claygent_child_record(
+                _sheriff_child_record(
                     table_id=table_id,
                     name=child_name,
                     field=field,
@@ -546,16 +546,16 @@ class TableService:
         await self._repository.update_table(table_id)
         return await self.get_table(table_id)
 
-    async def _sync_claygent_outputs(
+    async def _sync_sheriff_outputs(
         self,
         table_id: str,
         column: dict[str, Any],
-        claygent: ClaygentConfig,
+        sheriff: SheriffConfig,
         columns: list[dict[str, Any]],
         *,
         parent_name: str,
     ) -> tuple[dict[str, Any], bool]:
-        _resolve_input_columns(claygent.enhanced_prompt or claygent.user_prompt, columns)
+        _resolve_input_columns(sheriff.enhanced_prompt or sheriff.user_prompt, columns)
         existing_children = [
             item
             for item in columns
@@ -564,8 +564,8 @@ class TableService:
         by_field = {
             str(item.get("source_field") or ""): item for item in existing_children
         }
-        new_fields: list[ClaygentOutputField] = []
-        for field in claygent.outputs:
+        new_fields: list[SheriffOutputField] = []
+        for field in sheriff.outputs:
             child = by_field.get(field.key)
             if child is None:
                 new_fields.append(field)
@@ -589,7 +589,7 @@ class TableService:
                 child_name = unique_child_name(parent_name, field.key, taken)
                 taken.add(child_name)
                 records.append(
-                    _claygent_child_record(
+                    _sheriff_child_record(
                         table_id=table_id,
                         name=child_name,
                         field=field,
@@ -602,25 +602,25 @@ class TableService:
                 await self._repository.insert_columns(records)
             except APIError as error:
                 _reraise_unique(error, "A column with this name already exists")
-        return _claygent_config_record(claygent, columns), bool(new_fields)
+        return _sheriff_config_record(sheriff, columns), bool(new_fields)
 
-    async def _execute_claygent_item(
+    async def _execute_sheriff_item(
         self,
         *,
-        agent: ClaygentAgent,
+        agent: SheriffAgent,
         table_id: str,
         column: dict[str, Any],
         columns: list[dict[str, Any]],
         children: dict[str, dict[str, Any]],
         prompt: str,
-        outputs: list[ClaygentOutputField],
+        outputs: list[SheriffOutputField],
         item: dict[str, Any],
         row: dict[str, Any] | None,
     ) -> None:
         item_id = str(item["id"])
         column_id = str(column["id"])
         if row is None:
-            await self._repository.update_claygent_run_item(
+            await self._repository.update_sheriff_run_item(
                 item_id,
                 {"status": "failed", "error_message": "Row not found"},
             )
@@ -628,40 +628,40 @@ class TableService:
         row_id = str(row["id"])
         fresh = await self._repository.get_row(table_id, row_id)
         if fresh is None:
-            await self._repository.update_claygent_run_item(
+            await self._repository.update_sheriff_run_item(
                 item_id,
                 {"status": "failed", "error_message": "Row not found"},
             )
             return
         values = dict(fresh.get("values") or {})
-        values[column_id] = _claygent_cell(status="running")
+        values[column_id] = _sheriff_cell(status="running")
         await self._repository.replace_row_values([(row_id, values)])
-        await self._repository.update_claygent_run_item(item_id, {"status": "running"})
+        await self._repository.update_sheriff_run_item(item_id, {"status": "running"})
         try:
             interpolated = interpolate_prompt(
                 prompt,
                 _interpolation_values(columns, values),
-                invalid_names=_claygent_column_names(columns),
+                invalid_names=_sheriff_column_names(columns),
             )
             result = await agent.research(prompt=interpolated, outputs=outputs)
         except (UnknownPlaceholderError, InvalidPlaceholderError) as error:
-            values[column_id] = _claygent_cell(status="failed", error=str(error))
+            values[column_id] = _sheriff_cell(status="failed", error=str(error))
             await self._repository.replace_row_values([(row_id, values)])
-            await self._repository.update_claygent_run_item(
+            await self._repository.update_sheriff_run_item(
                 item_id,
                 {"status": "failed", "error_message": str(error)},
             )
             return
         except Exception as error:
-            values[column_id] = _claygent_cell(status="failed", error=str(error))
+            values[column_id] = _sheriff_cell(status="failed", error=str(error))
             await self._repository.replace_row_values([(row_id, values)])
-            await self._repository.update_claygent_run_item(
+            await self._repository.update_sheriff_run_item(
                 item_id,
                 {"status": "failed", "error_message": str(error)},
             )
             return
         output, values = _apply_research_output(values, children, outputs, result.output)
-        values[column_id] = _claygent_cell(
+        values[column_id] = _sheriff_cell(
             status="succeeded",
             confidence=result.confidence,
             confidence_reason=result.confidence_reason,
@@ -669,7 +669,7 @@ class TableService:
             output=output,
         )
         await self._repository.replace_row_values([(row_id, values)])
-        await self._repository.update_claygent_run_item(
+        await self._repository.update_sheriff_run_item(
             item_id,
             {
                 "status": "succeeded",
@@ -686,11 +686,11 @@ class TableService:
         table_id: str,
         column_id: str,
     ) -> None:
-        items = await self._repository.list_claygent_run_items(run_id)
+        items = await self._repository.list_sheriff_run_items(run_id)
         for item in items:
             if item["status"] not in {"queued", "running"}:
                 continue
-            await self._repository.update_claygent_run_item(
+            await self._repository.update_sheriff_run_item(
                 str(item["id"]),
                 {"status": "failed", "error_message": message},
             )
@@ -698,11 +698,11 @@ class TableService:
             if row is None:
                 continue
             values = dict(row.get("values") or {})
-            values[column_id] = _claygent_cell(status="failed", error=message)
+            values[column_id] = _sheriff_cell(status="failed", error=message)
             await self._repository.replace_row_values([(str(item["row_id"]), values)])
 
-    async def _finalize_claygent_run(self, run_id: str) -> None:
-        items = await self._repository.list_claygent_run_items(run_id)
+    async def _finalize_sheriff_run(self, run_id: str) -> None:
+        items = await self._repository.list_sheriff_run_items(run_id)
         succeeded = sum(1 for item in items if item["status"] == "succeeded")
         failed = sum(1 for item in items if item["status"] == "failed")
         skipped = sum(1 for item in items if item["status"] == "skipped")
@@ -712,7 +712,7 @@ class TableService:
             status = "failed"
         else:
             status = "succeeded"
-        await self._repository.update_claygent_run(
+        await self._repository.update_sheriff_run(
             run_id,
             {
                 "status": status,
@@ -828,9 +828,9 @@ def _validate_filters(
                 f"Filter column {item.column_id} was not found on this table"
             )
         column_type = column["type"]
-        if column_type == "claygent" and item.operator != "is_empty":
+        if column_type == "sheriff" and item.operator != "is_empty":
             raise TableValidationError(
-                "claygent columns only support is_empty filters"
+                "sheriff columns only support is_empty filters"
             )
         if item.operator == "contains" and column_type != "text":
             raise TableValidationError("contains filters can only be used on text columns")
@@ -901,7 +901,7 @@ def _normalize_values(
         if column is None:
             raise TableValidationError(f"Unknown column {key}")
         column_type = column["type"]
-        if column_type == "claygent":
+        if column_type == "sheriff":
             raise TableValidationError(
                 f"Column {column['name']} is computed and cannot be patched"
             )
@@ -919,11 +919,11 @@ def _normalize_values(
     return result
 
 
-def _claygent_child_record(
+def _sheriff_child_record(
     *,
     table_id: str,
     name: str,
-    field: ClaygentOutputField,
+    field: SheriffOutputField,
     position: int,
     source_column_id: str,
     now: str,
@@ -942,23 +942,23 @@ def _claygent_child_record(
     }
 
 
-def _claygent_config_record(
-    claygent: ClaygentConfig, columns: list[dict[str, Any]]
+def _sheriff_config_record(
+    sheriff: SheriffConfig, columns: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    prompt = claygent.enhanced_prompt or claygent.user_prompt
+    prompt = sheriff.enhanced_prompt or sheriff.user_prompt
     input_columns = _resolve_input_columns(prompt, columns)
     return {
-        "user_prompt": claygent.user_prompt,
-        "enhanced_prompt": claygent.enhanced_prompt,
-        "outputs": [field.model_dump() for field in claygent.outputs],
+        "user_prompt": sheriff.user_prompt,
+        "enhanced_prompt": sheriff.enhanced_prompt,
+        "outputs": [field.model_dump() for field in sheriff.outputs],
         "input_column_ids": [str(column["id"]) for column in input_columns],
     }
 
 
-def _parse_claygent_config(raw: Any) -> ClaygentConfig:
+def _parse_sheriff_config(raw: Any) -> SheriffConfig:
     if not isinstance(raw, dict):
-        raise TableValidationError("Claygent column is missing config")
-    return ClaygentConfig.model_validate(
+        raise TableValidationError("Sheriff column is missing config")
+    return SheriffConfig.model_validate(
         {
             "user_prompt": raw.get("user_prompt") or "",
             "enhanced_prompt": raw.get("enhanced_prompt"),
@@ -981,9 +981,9 @@ def _resolve_input_columns(
         column_id = str(column["id"])
         if column_id in seen:
             return
-        if column["type"] == "claygent":
+        if column["type"] == "sheriff":
             raise TableValidationError(
-                f"Column {column['name']} cannot be used as a claygent input"
+                f"Column {column['name']} cannot be used as a sheriff input"
             )
         seen.add(column_id)
         selected.append(column)
@@ -1005,9 +1005,9 @@ def _select_run_rows(
     rows: list[dict[str, Any]], row_ids: list[UUID] | None
 ) -> list[dict[str, Any]]:
     if row_ids is None:
-        if len(rows) > _MAX_CLAYGENT_RUN_ROWS:
+        if len(rows) > _MAX_SHERIFF_RUN_ROWS:
             raise TableValidationError(
-                f"a run may include at most {_MAX_CLAYGENT_RUN_ROWS} rows"
+                f"a run may include at most {_MAX_SHERIFF_RUN_ROWS} rows"
             )
         return rows
     by_id = {str(row["id"]): row for row in rows}
@@ -1017,9 +1017,9 @@ def _select_run_rows(
         if row is None:
             raise TableValidationError(f"Unknown row {row_id}")
         selected.append(row)
-    if len(selected) > _MAX_CLAYGENT_RUN_ROWS:
+    if len(selected) > _MAX_SHERIFF_RUN_ROWS:
         raise TableValidationError(
-            f"a run may include at most {_MAX_CLAYGENT_RUN_ROWS} rows"
+            f"a run may include at most {_MAX_SHERIFF_RUN_ROWS} rows"
         )
     return selected
 
@@ -1029,17 +1029,17 @@ def _interpolation_values(
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for column in columns:
-        if column["type"] == "claygent":
+        if column["type"] == "sheriff":
             continue
         result[str(column["name"])] = stringify_cell(values.get(str(column["id"])))
     return result
 
 
-def _claygent_column_names(columns: list[dict[str, Any]]) -> set[str]:
-    return {str(column["name"]) for column in columns if column["type"] == "claygent"}
+def _sheriff_column_names(columns: list[dict[str, Any]]) -> set[str]:
+    return {str(column["name"]) for column in columns if column["type"] == "sheriff"}
 
 
-def _claygent_cell(
+def _sheriff_cell(
     *,
     status: str,
     confidence: str | None = None,
@@ -1061,7 +1061,7 @@ def _claygent_cell(
 def _apply_research_output(
     values: dict[str, Any],
     children: dict[str, dict[str, Any]],
-    outputs: list[ClaygentOutputField],
+    outputs: list[SheriffOutputField],
     raw_output: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cell_output: dict[str, Any] = {}
