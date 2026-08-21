@@ -23,9 +23,58 @@ class SheriffSource(BaseModel):
     title: str = ""
 
 
+class PerplexityUsage(BaseModel):
+    model: str
+    perplexity_response_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    input_cost: float | None = None
+    output_cost: float | None = None
+    tool_calls_cost: float | None = None
+    cache_creation_cost: float | None = None
+    cache_read_cost: float | None = None
+    model_cost: float | None = None
+    total_cost: float | None = None
+    tool_calls_details: dict[str, Any] | None = None
+    usage_raw: dict[str, Any] | None = None
+
+    def to_record(
+        self,
+        *,
+        operation: Literal["expand", "research"],
+        table_id: str,
+        column_id: str | None = None,
+        run_id: str | None = None,
+        run_item_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "operation": operation,
+            "model": self.model,
+            "table_id": table_id,
+            "column_id": column_id,
+            "run_id": run_id,
+            "run_item_id": run_item_id,
+            "perplexity_response_id": self.perplexity_response_id,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "input_cost": self.input_cost,
+            "output_cost": self.output_cost,
+            "tool_calls_cost": self.tool_calls_cost,
+            "cache_creation_cost": self.cache_creation_cost,
+            "cache_read_cost": self.cache_read_cost,
+            "model_cost": self.model_cost,
+            "total_cost": self.total_cost,
+            "tool_calls_details": self.tool_calls_details,
+            "usage_raw": self.usage_raw,
+        }
+
+
 class SheriffExpandResult(BaseModel):
     enhanced_prompt: str
     outputs: list[SheriffOutputField] = Field(min_length=1, max_length=10)
+    usage: PerplexityUsage | None = None
 
 
 class SheriffResearchResult(BaseModel):
@@ -34,6 +83,7 @@ class SheriffResearchResult(BaseModel):
     confidence_reason: str
     sources: list[SheriffSource] = Field(default_factory=list)
     usage_cost: float | None = None
+    usage: PerplexityUsage | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

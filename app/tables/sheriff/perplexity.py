@@ -12,6 +12,7 @@ from app.tables.sheriff.prompts import (
     expand_json_schema,
 )
 from app.tables.sheriff.protocol import (
+    PerplexityUsage,
     SheriffExpandResult,
     SheriffOutputField,
     SheriffResearchResult,
@@ -56,7 +57,11 @@ class PerplexitySheriffAgent:
         enhanced = str(data.get("enhanced_prompt") or "").strip()
         if not enhanced or not outputs:
             raise ValueError("Sheriff expand did not return a prompt and outputs")
-        return SheriffExpandResult(enhanced_prompt=enhanced, outputs=outputs[:10])
+        return SheriffExpandResult(
+            enhanced_prompt=enhanced,
+            outputs=outputs[:10],
+            usage=payload.get("usage"),
+        )
 
     async def research(
         self, *, prompt: str, outputs: list[SheriffOutputField]
@@ -70,19 +75,23 @@ class PerplexitySheriffAgent:
             max_steps=4,
         )
         data = _parse_json_object(payload["text"])
+        usage = payload.get("usage")
+        usage_cost = usage.total_cost if isinstance(usage, PerplexityUsage) else None
         result = SheriffResearchResult.model_validate(
             {
                 "output": data.get("output") or {},
                 "confidence": data.get("confidence") or "low",
                 "confidence_reason": data.get("confidence_reason") or "",
                 "sources": data.get("sources") or [],
-                "usage_cost": payload.get("usage_cost"),
+                "usage_cost": usage_cost,
+                "usage": usage,
                 "raw": {
                     "output": data.get("output") or {},
                     "confidence": data.get("confidence"),
                     "confidence_reason": data.get("confidence_reason"),
                     "sources": data.get("sources") or [],
-                    "usage_cost": payload.get("usage_cost"),
+                    "usage_cost": usage_cost,
+                    "usage": usage.model_dump() if isinstance(usage, PerplexityUsage) else None,
                 },
             }
         )
@@ -91,8 +100,6 @@ class PerplexitySheriffAgent:
         else:
             result.sources = _merge_sources(result.sources, payload["sources"])
         result.raw["sources"] = [item.model_dump() for item in result.sources]
-        if result.usage_cost is not None:
-            logger.info("sheriff usage cost total_cost=%s", result.usage_cost)
         return result
 
     async def _create(
@@ -128,10 +135,18 @@ class PerplexitySheriffAgent:
         text = _output_text(dumped)
         if not text:
             raise RuntimeError("Sheriff agent returned an empty response")
+        usage = parse_perplexity_usage(dumped, model=self._model)
+        if usage is not None:
+            logger.info(
+                "sheriff usage cost model_cost=%s tool_calls_cost=%s total_cost=%s",
+                usage.model_cost,
+                usage.tool_calls_cost,
+                usage.total_cost,
+            )
         return {
             "text": text,
             "sources": _search_sources(dumped),
-            "usage_cost": _usage_cost(dumped),
+            "usage": usage,
         }
 
 
@@ -195,16 +210,93 @@ def _search_sources(dumped: dict[str, Any]) -> list[SheriffSource]:
     return sources
 
 
-def _usage_cost(dumped: dict[str, Any]) -> float | None:
+def parse_perplexity_usage(
+    dumped: dict[str, Any], *, model: str
+) -> PerplexityUsage | None:
     usage = dumped.get("usage")
-    if not isinstance(usage, dict):
+    if usage is None:
         return None
+    if not isinstance(usage, dict):
+        usage = _dump(usage)
+        if not isinstance(usage, dict):
+            return None
     cost = usage.get("cost")
     if not isinstance(cost, dict):
-        return None
-    total = cost.get("total_cost")
-    if isinstance(total, (int, float)):
-        return float(total)
+        cost = _dump(cost) if cost is not None else {}
+        if not isinstance(cost, dict):
+            cost = {}
+    input_cost = _as_float(cost.get("input_cost"), cost.get("input_tokens_cost"))
+    output_cost = _as_float(cost.get("output_cost"), cost.get("output_tokens_cost"))
+    tool_calls_cost = _as_float(cost.get("tool_calls_cost"))
+    cache_creation_cost = _as_float(cost.get("cache_creation_cost"))
+    cache_read_cost = _as_float(cost.get("cache_read_cost"))
+    total_cost = _as_float(cost.get("total_cost"))
+    details = usage.get("tool_calls_details")
+    if not isinstance(details, dict):
+        details = None
+    response_id = dumped.get("id")
+    return PerplexityUsage(
+        model=str(dumped.get("model") or model),
+        perplexity_response_id=response_id if isinstance(response_id, str) else None,
+        input_tokens=_as_int(usage.get("input_tokens"), usage.get("prompt_tokens")),
+        output_tokens=_as_int(
+            usage.get("output_tokens"), usage.get("completion_tokens")
+        ),
+        total_tokens=_as_int(usage.get("total_tokens")),
+        input_cost=input_cost,
+        output_cost=output_cost,
+        tool_calls_cost=tool_calls_cost,
+        cache_creation_cost=cache_creation_cost,
+        cache_read_cost=cache_read_cost,
+        model_cost=_model_cost(
+            total_cost=total_cost,
+            tool_calls_cost=tool_calls_cost,
+            input_cost=input_cost,
+            output_cost=output_cost,
+            cache_creation_cost=cache_creation_cost,
+            cache_read_cost=cache_read_cost,
+        ),
+        total_cost=total_cost,
+        tool_calls_details=details,
+        usage_raw=usage,
+    )
+
+
+def _as_float(*values: Any) -> float | None:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _as_int(*values: Any) -> int | None:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+    return None
+
+
+def _model_cost(
+    *,
+    total_cost: float | None,
+    tool_calls_cost: float | None,
+    input_cost: float | None,
+    output_cost: float | None,
+    cache_creation_cost: float | None,
+    cache_read_cost: float | None,
+) -> float | None:
+    if total_cost is not None and tool_calls_cost is not None:
+        return round(total_cost - tool_calls_cost, 8)
+    parts = [input_cost, output_cost, cache_creation_cost, cache_read_cost]
+    present = [part for part in parts if part is not None]
+    if present:
+        return round(sum(present), 8)
     return None
 
 

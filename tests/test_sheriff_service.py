@@ -4,7 +4,12 @@ from uuid import uuid4
 import pytest
 
 from app.tables.sheriff import SheriffUnavailableError
-from app.tables.sheriff.protocol import SheriffExpandResult, SheriffOutputField, SheriffResearchResult
+from app.tables.sheriff.protocol import (
+    PerplexityUsage,
+    SheriffExpandResult,
+    SheriffOutputField,
+    SheriffResearchResult,
+)
 from app.tables.schemas import (
     SheriffConfig,
     SheriffExpandRequest,
@@ -31,6 +36,14 @@ class FakeSheriffAgent:
                 SheriffOutputField(key="first_name", type="text"),
                 SheriffOutputField(key="last_name", type="text"),
             ],
+            usage=PerplexityUsage(
+                model="openai/gpt-5.4-mini",
+                input_cost=0.002,
+                output_cost=0.0,
+                tool_calls_cost=0.0,
+                model_cost=0.002,
+                total_cost=0.002,
+            ),
         )
         self.research_result = SheriffResearchResult(
             output={"first_name": "Ada", "last_name": "Lovelace"},
@@ -38,6 +51,18 @@ class FakeSheriffAgent:
             confidence_reason="LinkedIn SERP headline still lists Acme",
             sources=[{"url": "https://linkedin.com/in/ada", "title": "Ada Lovelace"}],
             usage_cost=0.01,
+            usage=PerplexityUsage(
+                model="openai/gpt-5.4-mini",
+                input_cost=0.004,
+                output_cost=0.003,
+                tool_calls_cost=0.003,
+                model_cost=0.007,
+                total_cost=0.01,
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+                tool_calls_details={"search_web": {"invocation": 1}},
+            ),
             raw={"output": {"first_name": "Ada", "last_name": "Lovelace"}, "usage_cost": 0.01},
         )
 
@@ -81,6 +106,15 @@ async def test_expand_returns_schema_and_rejects_unknown_placeholders() -> None:
     assert expanded["enhanced_prompt"] == agent.expand_result.enhanced_prompt
     assert [item["key"] for item in expanded["outputs"]] == ["first_name", "last_name"]
     assert expanded["input_columns"][0]["name"] == "Company"
+    assert len(_repository.perplexity_usage) == 1
+    usage_row = _repository.perplexity_usage[0]
+    assert usage_row["operation"] == "expand"
+    assert usage_row["table_id"] == table["id"]
+    assert usage_row["column_id"] is None
+    assert usage_row["run_id"] is None
+    assert usage_row["model_cost"] == 0.002
+    assert usage_row["tool_calls_cost"] == 0.0
+    assert usage_row["total_cost"] == 0.002
 
     with pytest.raises(TableValidationError, match="Unknown column placeholder"):
         await service.expand_sheriff_prompt(
@@ -186,6 +220,42 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     assert values[str(last["id"])] == "Lovelace"
     stored_item = next(iter(repository.run_items.values()))
     assert stored_item["model_response"]["usage_cost"] == 0.01
+    assert len(repository.perplexity_usage) == 1
+    usage_row = repository.perplexity_usage[0]
+    assert usage_row["operation"] == "research"
+    assert usage_row["table_id"] == table["id"]
+    assert usage_row["column_id"] == parent["id"]
+    assert usage_row["run_id"] == run["id"]
+    assert usage_row["run_item_id"] == stored_item["id"]
+    assert usage_row["model_cost"] == 0.007
+    assert usage_row["tool_calls_cost"] == 0.003
+    assert usage_row["total_cost"] == 0.01
+    assert usage_row["tool_calls_details"] == {"search_web": {"invocation": 1}}
+
+
+@pytest.mark.asyncio
+async def test_usage_insert_failure_does_not_fail_research() -> None:
+    agent = FakeSheriffAgent()
+    service, repository = _service(agent)
+    repository.fail_usage_insert = True
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    created = await service.add_column(table["id"], _sheriff_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    run = await service.start_sheriff_run(
+        table["id"],
+        parent["id"],
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_sheriff_run(run["id"])
+    finished = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
+    assert finished["status"] == "succeeded"
+    assert repository.perplexity_usage == []
 
 
 @pytest.mark.asyncio

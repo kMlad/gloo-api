@@ -1,4 +1,5 @@
 from app.tables.sheriff.protocol import (
+    PerplexityUsage,
     SheriffAgent,
     SheriffExpandResult,
     SheriffOutputField,
@@ -10,6 +11,7 @@ from app.tables.sheriff.protocol import (
 )
 
 __all__ = [
+    "PerplexityUsage",
     "SheriffAgent",
     "SheriffExpandResult",
     "SheriffOutputField",

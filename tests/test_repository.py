@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.repositories import Repository
+from app.tables.repository import TableRepository, _ROW_LIST_CHUNK
 
 
 class QueryStub:
@@ -109,3 +110,48 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
         index for index, call in enumerate(lead_calls) if call[1] == "range"
     )
     assert filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_table_rows_use_exact_count_and_range() -> None:
+    row = {"id": "row-1", "table_id": "table-1", "position": 0, "values": {}}
+    database = DatabaseStub({"table_rows": [SimpleNamespace(data=[row], count=4821)]})
+
+    items, total = await TableRepository(database).list_rows(
+        "table-1", limit=100, offset=400
+    )
+
+    assert items == [row]
+    assert total == 4821
+    assert database.calls == [
+        ("table_rows", "select", ("*",), {"count": "exact"}),
+        ("table_rows", "eq", ("table_id", "table-1"), {}),
+        ("table_rows", "order", ("position",), {}),
+        ("table_rows", "order", ("id",), {}),
+        ("table_rows", "range", (400, 499), {}),
+        ("table_rows", "execute", (), {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_table_list_all_rows_pages_until_short_chunk() -> None:
+    first_page = [{"id": f"row-{index}", "position": index} for index in range(_ROW_LIST_CHUNK)]
+    second_page = [{"id": "row-last", "position": _ROW_LIST_CHUNK}]
+    database = DatabaseStub(
+        {
+            "table_rows": [
+                SimpleNamespace(data=first_page, count=_ROW_LIST_CHUNK + 1),
+                SimpleNamespace(data=second_page, count=_ROW_LIST_CHUNK + 1),
+            ]
+        }
+    )
+
+    rows = await TableRepository(database).list_all_rows("table-1")
+
+    assert len(rows) == _ROW_LIST_CHUNK + 1
+    assert rows[-1]["id"] == "row-last"
+    ranges = [call[2] for call in database.calls if call[1] == "range"]
+    assert ranges == [
+        (0, _ROW_LIST_CHUNK - 1),
+        (_ROW_LIST_CHUNK, _ROW_LIST_CHUNK * 2 - 1),
+    ]

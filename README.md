@@ -150,12 +150,20 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/imports \
 CSV files must be UTF-8, comma-separated, at most 5 MB, 50 columns, and 10,000
 data rows. Duplicate or empty headers are rejected.
 
-List tables with `GET /api/v1/tables`. Load schema, saved filters, and column
-order with `GET /api/v1/tables/{table_id}`. Rows are paged separately:
+List tables with `GET /api/v1/tables` (`row_count` is an exact Postgres count).
+Load schema, saved filters, and column order with `GET /api/v1/tables/{table_id}`.
+Rows are paged separately; `total` is the exact matching count, independent of
+PostgREST's payload cap:
 
 ```text
 GET /api/v1/tables/{table_id}/rows?limit=100&offset=0
 ```
+
+`limit` is 1–200 (default 100). The UI can request later windows as the user
+scrolls. Local `[api] max_rows` in `supabase/config.toml` is 10,000 to match CSV
+import; restart local Supabase after changing it (`supabase stop && supabase start`).
+Hosted projects have a separate **Max rows** setting under Project Settings → API
+— set that to 10,000 as well, or production stays capped at the default 1,000.
 
 Saved filters are applied on row reads. Replace them with
 `PUT /api/v1/tables/{table_id}/filters`. Rename or hide a column with

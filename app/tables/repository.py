@@ -6,6 +6,7 @@ from supabase import AsyncClient
 from app.utils import chunks, to_iso, utc_now
 
 _ROW_INSERT_CHUNK = 100
+_ROW_LIST_CHUNK = 1000
 
 
 def _embedded_count(value: Any) -> int:
@@ -177,16 +178,31 @@ class TableRepository:
             return None
         return int(response.data[0]["position"])
 
-    async def list_rows(self, table_id: str) -> list[dict[str, Any]]:
+    async def list_rows(
+        self, table_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
         response = await (
             self._db.table("table_rows")
-            .select("*")
+            .select("*", count="exact")
             .eq("table_id", table_id)
             .order("position")
             .order("id")
+            .range(offset, offset + limit - 1)
             .execute()
         )
-        return response.data
+        return response.data, response.count or 0
+
+    async def list_all_rows(self, table_id: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page, _total = await self.list_rows(
+                table_id, limit=_ROW_LIST_CHUNK, offset=offset
+            )
+            rows.extend(page)
+            if len(page) < _ROW_LIST_CHUNK:
+                return rows
+            offset += _ROW_LIST_CHUNK
 
     async def get_row(self, table_id: str, row_id: str) -> dict[str, Any] | None:
         response = await (
@@ -320,6 +336,10 @@ class TableRepository:
             .execute()
         )
         return response.data[0] if response.data else None
+
+    async def insert_perplexity_usage(self, record: dict[str, Any]) -> dict[str, Any]:
+        response = await self._db.table("perplexity_usage").insert(record).execute()
+        return response.data[0]
 
 
 def is_unique_violation(error: APIError) -> bool:

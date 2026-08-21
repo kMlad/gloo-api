@@ -140,3 +140,30 @@ def test_sheriff_rename_migration_updates_type_and_tables() -> None:
     assert "rename to table_sheriff_run_items" in migration
     assert "table_sheriff_runs_table_id_idx" in migration
     assert "replace(rec.conname, 'claygent', 'sheriff')" in migration
+
+
+def test_perplexity_usage_migration_is_private_and_split() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_perplexity_usage.sql")
+    ).read_text()
+    assert "create table public.perplexity_usage" in migration
+    assert "operation text not null check (operation in ('expand', 'research'))" in migration
+    assert "model_cost numeric(12, 8)" in migration
+    assert "tool_calls_cost numeric(12, 8)" in migration
+    assert "total_cost numeric(12, 8)" in migration
+    assert "on delete set null" in migration
+    assert "perplexity_usage_created_at_idx" in migration
+    assert "perplexity_usage_run_id_idx" in migration
+    assert "perplexity_usage_table_id_created_at_idx" in migration
+    assert "alter table public.perplexity_usage enable row level security" in migration
+    assert (
+        "revoke all on table public.perplexity_usage from public, anon, authenticated"
+        in migration
+    )
+    assert "revoke all on table public.perplexity_usage from service_role" in migration
+    assert (
+        "grant select, insert, update, delete on table public.perplexity_usage to service_role"
+        in migration
+    )
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration

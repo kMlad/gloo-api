@@ -1,10 +1,12 @@
 import asyncio
-from typing import Any
+import logging
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError
 
 from app.tables.sheriff import (
+    PerplexityUsage,
     SheriffAgent,
     SheriffUnavailableError,
     InvalidPlaceholderError,
@@ -34,6 +36,8 @@ from app.tables.schemas import (
     TableUpdate,
 )
 from app.utils import to_iso, utc_now
+
+logger = logging.getLogger(__name__)
 
 _POSITION_OFFSET = 10_000
 _MAX_SHERIFF_RUN_ROWS = 100
@@ -250,7 +254,7 @@ class TableService:
             for item in columns
             if str(item.get("source_column_id") or "") == column_id
         )
-        rows = await self._repository.list_rows(table_id)
+        rows = await self._repository.list_all_rows(table_id)
         updates: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
             values = dict(row.get("values") or {})
@@ -269,16 +273,22 @@ class TableService:
         table, columns = await self._require_table_and_columns(table_id)
         filters = _parse_filters(table.get("filters") or [])
         _validate_filters(filters, columns)
-        rows = await self._repository.list_rows(table_id)
-        matched = [
-            row
-            for row in rows
-            if _row_matches_filters(row.get("values") or {}, filters, columns)
-        ]
-        page = matched[offset : offset + limit]
+        if filters:
+            rows = await self._repository.list_all_rows(table_id)
+            matched = [
+                row
+                for row in rows
+                if _row_matches_filters(row.get("values") or {}, filters, columns)
+            ]
+            page = matched[offset : offset + limit]
+            total = len(matched)
+        else:
+            page, total = await self._repository.list_rows(
+                table_id, limit=limit, offset=offset
+            )
         return {
             "items": [_row_response(row, columns) for row in page],
-            "total": len(matched),
+            "total": total,
             "limit": limit,
             "offset": offset,
         }
@@ -345,6 +355,11 @@ class TableService:
                 if column["type"] != "sheriff"
             ],
         )
+        await self._record_perplexity_usage(
+            result.usage,
+            operation="expand",
+            table_id=table_id,
+        )
         return {
             "user_prompt": payload.goal,
             "enhanced_prompt": result.enhanced_prompt,
@@ -368,7 +383,7 @@ class TableService:
         if column["type"] != "sheriff":
             raise TableValidationError("Runs are only supported on sheriff columns")
         self._require_agent()
-        rows = await self._repository.list_rows(table_id)
+        rows = await self._repository.list_all_rows(table_id)
         selected = _select_run_rows(rows, payload.row_ids)
         now = to_iso(utc_now())
         run = await self._repository.insert_sheriff_run(
@@ -449,7 +464,7 @@ class TableService:
             }
             rows = {
                 str(row["id"]): row
-                for row in await self._repository.list_rows(table_id)
+                for row in await self._repository.list_all_rows(table_id)
             }
             items = await self._repository.list_sheriff_run_items(run_id)
             semaphore = asyncio.Semaphore(self._concurrency)
@@ -677,6 +692,14 @@ class TableService:
                 "model_response": result.raw or result.model_dump(exclude={"raw"}),
             },
         )
+        await self._record_perplexity_usage(
+            result.usage,
+            operation="research",
+            table_id=table_id,
+            column_id=column_id,
+            run_id=str(item["run_id"]),
+            run_item_id=item_id,
+        )
 
     async def _fail_open_run_items(
         self,
@@ -723,6 +746,35 @@ class TableService:
                 "completed_at": to_iso(utc_now()),
             },
         )
+
+    async def _record_perplexity_usage(
+        self,
+        usage: PerplexityUsage | None,
+        *,
+        operation: Literal["expand", "research"],
+        table_id: str,
+        column_id: str | None = None,
+        run_id: str | None = None,
+        run_item_id: str | None = None,
+    ) -> None:
+        if usage is None:
+            return
+        try:
+            await self._repository.insert_perplexity_usage(
+                usage.to_record(
+                    operation=operation,
+                    table_id=table_id,
+                    column_id=column_id,
+                    run_id=run_id,
+                    run_item_id=run_item_id,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "failed to persist perplexity usage operation=%s table_id=%s",
+                operation,
+                table_id,
+            )
 
     async def _require_table(self, table_id: str) -> dict[str, Any]:
         table = await self._repository.get_table(table_id)

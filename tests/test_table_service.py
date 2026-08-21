@@ -38,6 +38,8 @@ class FakeTableRepository:
         self.rows: dict[str, dict] = {}
         self.runs: dict[str, dict] = {}
         self.run_items: dict[str, dict] = {}
+        self.perplexity_usage: list[dict] = []
+        self.fail_usage_insert = False
 
     async def list_tables(self) -> list[dict]:
         items = []
@@ -197,7 +199,13 @@ class FakeTableRepository:
         ]
         return max(positions) if positions else None
 
-    async def list_rows(self, table_id: str) -> list[dict]:
+    async def list_rows(
+        self, table_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        rows = await self.list_all_rows(table_id)
+        return rows[offset : offset + limit], len(rows)
+
+    async def list_all_rows(self, table_id: str) -> list[dict]:
         rows = [
             deepcopy(row) for row in self.rows.values() if row["table_id"] == table_id
         ]
@@ -292,6 +300,13 @@ class FakeTableRepository:
         item.update(values)
         item["updated_at"] = _now()
         return deepcopy(item)
+
+    async def insert_perplexity_usage(self, record: dict) -> dict:
+        if self.fail_usage_insert:
+            raise RuntimeError("usage insert failed")
+        stored = {**record, "id": record.get("id") or str(uuid4())}
+        self.perplexity_usage.append(stored)
+        return deepcopy(stored)
 
     def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
         for existing in self.columns.values():
@@ -550,3 +565,56 @@ async def test_rename_table_and_delete_row() -> None:
     await service.delete_table(table["id"])
     with pytest.raises(TableNotFoundError):
         await service.get_table(table["id"])
+
+
+@pytest.mark.asyncio
+async def test_list_rows_pages_and_reports_full_total() -> None:
+    service, _repository = _service()
+    table = await service.create_table(
+        TableCreate(name="Unicorns", columns=[ColumnCreate(name="Name")]),
+        created_by=str(uuid4()),
+    )
+    name_id = table["columns"][0]["id"]
+    for index in range(15):
+        await service.add_row(
+            table["id"], RowCreate(values={name_id: f"co-{index:02d}"})
+        )
+    listed = await service.list_rows(table["id"], limit=5, offset=10)
+    assert listed["total"] == 15
+    assert listed["limit"] == 5
+    assert listed["offset"] == 10
+    assert [item["values"][str(name_id)] for item in listed["items"]] == [
+        "co-10",
+        "co-11",
+        "co-12",
+        "co-13",
+        "co-14",
+    ]
+    empty = await service.list_rows(table["id"], limit=5, offset=15)
+    assert empty["total"] == 15
+    assert empty["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_rows_pages_filtered_matches() -> None:
+    service, _repository = _service()
+    table = await service.create_table(
+        TableCreate(name="Leads", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    for index in range(8):
+        name = f"Acme {index}" if index % 2 == 0 else f"Globex {index}"
+        await service.add_row(table["id"], RowCreate(values={company_id: name}))
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[TableFilter(column_id=company_id, operator="contains", value="acme")]
+        ),
+    )
+    listed = await service.list_rows(table["id"], limit=2, offset=2)
+    assert listed["total"] == 4
+    assert [item["values"][str(company_id)] for item in listed["items"]] == [
+        "Acme 4",
+        "Acme 6",
+    ]
