@@ -5,6 +5,15 @@ from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError
 
+from app.tables.email_enrichment import (
+    EmailEnrichmentUnavailableError,
+    EmailFinder,
+    EmailInputs,
+    EmailValidator,
+    run_waterfall,
+)
+from app.tables.email_enrichment.inputs import cell_text, normalize_domain, person_linkedin
+from app.tables.email_enrichment.protocol import AttemptRecord, WaterfallStep
 from app.tables.sheriff import (
     PerplexityUsage,
     SheriffAgent,
@@ -22,6 +31,8 @@ from app.tables.sheriff.prompts import (
 from app.tables.csv_import import parse_csv, table_name_from_filename
 from app.tables.repository import TableRepository, is_unique_violation
 from app.tables.schemas import (
+    COMPUTED_COLUMN_TYPES,
+    EmailEnrichmentConfig,
     SheriffConfig,
     SheriffExpandRequest,
     SheriffOutputField,
@@ -62,10 +73,16 @@ class TableService:
         *,
         sheriff_agent: SheriffAgent | None = None,
         sheriff_concurrency: int = 3,
+        email_finders: dict[str, EmailFinder] | None = None,
+        email_validator: EmailValidator | None = None,
+        email_concurrency: int = 3,
     ) -> None:
         self._repository = repository
         self._agent = sheriff_agent
         self._concurrency = sheriff_concurrency
+        self._email_finders = email_finders or {}
+        self._email_validator = email_validator
+        self._email_concurrency = email_concurrency
 
     async def list_tables(self) -> dict[str, Any]:
         items = await self._repository.list_tables()
@@ -165,6 +182,10 @@ class TableService:
             return await self._add_sheriff_column(
                 table_id, payload, columns, next_position, now
             )
+        if payload.type == "email_enrichment":
+            return await self._add_email_enrichment_column(
+                table_id, payload, columns, next_position, now
+            )
         try:
             inserted = await self._repository.insert_columns(
                 [
@@ -205,6 +226,13 @@ class TableService:
                 columns,
                 parent_name=payload.name or column["name"],
             )
+        if payload.email_enrichment is not None:
+            if column["type"] != "email_enrichment":
+                raise TableValidationError(
+                    "email_enrichment config is only valid on email_enrichment columns"
+                )
+            _validate_email_input_columns(payload.email_enrichment, columns, column_id)
+            config = _email_enrichment_config_record(payload.email_enrichment)
         try:
             updated = await self._repository.update_column(
                 column_id,
@@ -370,6 +398,10 @@ class TableService:
             ],
         }
 
+    async def get_column(self, table_id: str, column_id: str) -> dict[str, Any]:
+        columns = await self._require_columns(table_id)
+        return _column_by_id(columns, column_id)
+
     async def start_sheriff_run(
         self,
         table_id: str,
@@ -506,10 +538,402 @@ class TableService:
         items = await self._repository.list_sheriff_run_items(run_id)
         return {**run, "items": items}
 
+    async def start_email_enrichment_run(
+        self,
+        table_id: str,
+        column_id: str,
+        payload: SheriffRunCreate,
+        *,
+        created_by: str,
+    ) -> dict[str, Any]:
+        columns = await self._require_columns(table_id)
+        column = _column_by_id(columns, column_id)
+        if column["type"] != "email_enrichment":
+            raise TableValidationError(
+                "Email enrichment runs are only supported on email_enrichment columns"
+            )
+        self._require_email_validator()
+        config = _parse_email_enrichment_config(column.get("config"))
+        _validate_email_input_columns(config, columns, column_id)
+        rows = await self._repository.list_all_rows(table_id)
+        selected = _select_run_rows(rows, payload.row_ids)
+        now = to_iso(utc_now())
+        run = await self._repository.insert_email_enrichment_run(
+            {
+                "table_id": table_id,
+                "column_id": column_id,
+                "created_by": created_by,
+                "status": "queued",
+                "row_ids": (
+                    [str(row_id) for row_id in payload.row_ids]
+                    if payload.row_ids is not None
+                    else None
+                ),
+                "overwrite": payload.overwrite,
+                "total_count": len(selected),
+                "succeeded_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "not_found_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        run_id = str(run["id"])
+        items: list[dict[str, Any]] = []
+        cell_updates: list[tuple[str, dict[str, Any]]] = []
+        skipped = 0
+        for row in selected:
+            row_id = str(row["id"])
+            values = dict(row.get("values") or {})
+            cell = values.get(column_id)
+            skip = (
+                not payload.overwrite
+                and isinstance(cell, dict)
+                and cell.get("status") == "succeeded"
+            )
+            item_status = "skipped" if skip else "queued"
+            if skip:
+                skipped += 1
+            else:
+                values[column_id] = _email_enrichment_cell(status="queued")
+                cell_updates.append((row_id, values))
+            items.append(
+                {
+                    "run_id": run_id,
+                    "row_id": row_id,
+                    "status": item_status,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        if items:
+            await self._repository.insert_email_enrichment_run_items(items)
+        if cell_updates:
+            await self._repository.replace_row_values(cell_updates)
+        await self._repository.update_email_enrichment_run(
+            run_id, {"skipped_count": skipped, "total_count": len(selected)}
+        )
+        await self._repository.update_table(table_id)
+        return await self.get_email_enrichment_run(table_id, column_id, run_id)
+
+    async def execute_email_enrichment_run(self, run_id: str) -> None:
+        run = await self._repository.get_email_enrichment_run_by_id(run_id)
+        if run is None:
+            return
+        table_id = str(run["table_id"])
+        column_id = str(run["column_id"])
+        await self._repository.update_email_enrichment_run(run_id, {"status": "running"})
+        try:
+            columns = await self._require_columns(table_id)
+            column = _column_by_id(columns, column_id)
+            validator = self._require_email_validator()
+            config = _parse_email_enrichment_config(column.get("config"))
+            children = {
+                str(item.get("source_field") or ""): item
+                for item in columns
+                if str(item.get("source_column_id") or "") == column_id
+            }
+            rows = {
+                str(row["id"]): row
+                for row in await self._repository.list_all_rows(table_id)
+            }
+            items = await self._repository.list_email_enrichment_run_items(run_id)
+            semaphore = asyncio.Semaphore(self._email_concurrency)
+
+            async def process(item: dict[str, Any]) -> None:
+                if item["status"] == "skipped":
+                    return
+                async with semaphore:
+                    await self._execute_email_enrichment_item(
+                        table_id=table_id,
+                        column=column,
+                        columns=columns,
+                        children=children,
+                        config=config,
+                        validator=validator,
+                        item=item,
+                        row=rows.get(str(item["row_id"])),
+                    )
+
+            await asyncio.gather(*(process(item) for item in items))
+        except Exception as error:
+            await self._fail_open_email_run_items(
+                run_id,
+                str(error),
+                table_id=table_id,
+                column_id=column_id,
+            )
+        await self._finalize_email_enrichment_run(run_id)
+        await self._repository.update_table(table_id)
+
+    async def get_email_enrichment_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict[str, Any]:
+        await self._require_table(table_id)
+        run = await self._repository.get_email_enrichment_run(
+            table_id, column_id, run_id
+        )
+        if run is None:
+            raise TableNotFoundError("Run not found")
+        items = await self._repository.list_email_enrichment_run_items(run_id)
+        return {**run, "items": items}
+
+    async def get_column_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict[str, Any]:
+        await self._require_table(table_id)
+        sheriff = await self._repository.get_sheriff_run(table_id, column_id, run_id)
+        if sheriff is not None:
+            items = await self._repository.list_sheriff_run_items(run_id)
+            return {**sheriff, "not_found_count": 0, "items": items}
+        return await self.get_email_enrichment_run(table_id, column_id, run_id)
+
     def _require_agent(self) -> SheriffAgent:
         if self._agent is None:
             raise SheriffUnavailableError("Sheriff is not configured")
         return self._agent
+
+    def _require_email_validator(self) -> EmailValidator:
+        if self._email_validator is None:
+            raise EmailEnrichmentUnavailableError(
+                "Email enrichment is not configured"
+            )
+        return self._email_validator
+
+    async def _add_email_enrichment_column(
+        self,
+        table_id: str,
+        payload: ColumnCreate,
+        columns: list[dict[str, Any]],
+        next_position: int,
+        now: str,
+    ) -> dict[str, Any]:
+        assert payload.email_enrichment is not None
+        _validate_email_input_columns(payload.email_enrichment, columns)
+        config = _email_enrichment_config_record(payload.email_enrichment)
+        parent_id = str(uuid4())
+        taken = {str(column["name"]) for column in columns}
+        taken.add(payload.name)
+        child_name = unique_child_name(payload.name, "email", taken)
+        records = [
+            {
+                "id": parent_id,
+                "table_id": table_id,
+                "name": payload.name,
+                "type": "email_enrichment",
+                "position": next_position,
+                "hidden": False,
+                "config": config,
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "id": str(uuid4()),
+                "table_id": table_id,
+                "name": child_name,
+                "type": "text",
+                "position": next_position + 1,
+                "hidden": False,
+                "source_column_id": parent_id,
+                "source_field": "email",
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        try:
+            await self._repository.insert_columns(records)
+        except APIError as error:
+            _reraise_unique(error, "A column with this name already exists")
+        await self._repository.update_table(table_id)
+        return await self.get_table(table_id)
+
+    async def _execute_email_enrichment_item(
+        self,
+        *,
+        table_id: str,
+        column: dict[str, Any],
+        columns: list[dict[str, Any]],
+        children: dict[str, dict[str, Any]],
+        config: EmailEnrichmentConfig,
+        validator: EmailValidator,
+        item: dict[str, Any],
+        row: dict[str, Any] | None,
+    ) -> None:
+        item_id = str(item["id"])
+        column_id = str(column["id"])
+        if row is None:
+            await self._repository.update_email_enrichment_run_item(
+                item_id,
+                {"status": "failed", "error_message": "Row not found"},
+            )
+            return
+        row_id = str(row["id"])
+        fresh = await self._repository.get_row(table_id, row_id)
+        if fresh is None:
+            await self._repository.update_email_enrichment_run_item(
+                item_id,
+                {"status": "failed", "error_message": "Row not found"},
+            )
+            return
+        values = dict(fresh.get("values") or {})
+        existing = values.get(column_id)
+        rejected = (
+            list(existing.get("rejected_emails") or [])
+            if isinstance(existing, dict)
+            else []
+        )
+        values[column_id] = _email_enrichment_cell(
+            status="running", rejected_emails=rejected
+        )
+        await self._repository.replace_row_values([(row_id, values)])
+        await self._repository.update_email_enrichment_run_item(
+            item_id, {"status": "running"}
+        )
+        inputs = _email_inputs_from_row(config, columns, values)
+        if inputs is None:
+            values[column_id] = _email_enrichment_cell(
+                status="skipped",
+                rejected_emails=rejected,
+                error="Mapped input columns are required",
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            await self._repository.update_email_enrichment_run_item(
+                item_id,
+                {
+                    "status": "skipped",
+                    "error_message": "Mapped input columns are required",
+                },
+            )
+            return
+        try:
+            outcome = await run_waterfall(
+                providers=list(config.providers),
+                finders=self._email_finders,
+                validator=validator,
+                inputs=inputs,
+                rejected_emails=rejected,
+            )
+        except Exception as error:
+            values[column_id] = _email_enrichment_cell(
+                status="failed", rejected_emails=rejected, error=str(error)
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            await self._repository.update_email_enrichment_run_item(
+                item_id,
+                {"status": "failed", "error_message": str(error)},
+            )
+            return
+        child = children.get("email")
+        if outcome.status == "succeeded" and outcome.email and child is not None:
+            values[str(child["id"])] = outcome.email
+        values[column_id] = _email_enrichment_cell(
+            status=outcome.status,
+            email=outcome.email,
+            provider=outcome.provider,
+            validation_result=outcome.validation_result,
+            rejected_emails=outcome.rejected_emails,
+            steps=outcome.steps,
+            error=outcome.error,
+        )
+        await self._repository.replace_row_values([(row_id, values)])
+        await self._repository.update_email_enrichment_run_item(
+            item_id,
+            {
+                "status": outcome.status,
+                "error_message": outcome.error,
+            },
+        )
+        await self._persist_email_attempts(
+            run_id=str(item["run_id"]),
+            item_id=item_id,
+            attempts=outcome.attempts,
+        )
+
+    async def _persist_email_attempts(
+        self, *, run_id: str, item_id: str, attempts: list[AttemptRecord]
+    ) -> None:
+        if not attempts:
+            return
+        now = to_iso(utc_now())
+        records = []
+        for attempt in attempts:
+            records.append(
+                {
+                    "run_id": run_id,
+                    "item_id": item_id,
+                    "provider": attempt.provider,
+                    "sequence": attempt.sequence,
+                    "status": attempt.status,
+                    "request_payload": attempt.request_payload,
+                    "response_payload": attempt.response_payload,
+                    "response_headers": attempt.response_headers or {},
+                    "http_status": attempt.http_status,
+                    "external_request_id": attempt.external_request_id,
+                    "email_candidate": attempt.email_candidate,
+                    "validation_result": attempt.validation_result,
+                    "error_code": attempt.error_code,
+                    "error_message": attempt.error_message,
+                    "completed_at": now,
+                }
+            )
+        await self._repository.insert_email_enrichment_attempts(records)
+
+    async def _fail_open_email_run_items(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        table_id: str,
+        column_id: str,
+    ) -> None:
+        items = await self._repository.list_email_enrichment_run_items(run_id)
+        for item in items:
+            if item["status"] not in {"queued", "running"}:
+                continue
+            await self._repository.update_email_enrichment_run_item(
+                str(item["id"]),
+                {"status": "failed", "error_message": message},
+            )
+            row = await self._repository.get_row(table_id, str(item["row_id"]))
+            if row is None:
+                continue
+            values = dict(row.get("values") or {})
+            existing = values.get(column_id)
+            rejected = (
+                list(existing.get("rejected_emails") or [])
+                if isinstance(existing, dict)
+                else []
+            )
+            values[column_id] = _email_enrichment_cell(
+                status="failed", rejected_emails=rejected, error=message
+            )
+            await self._repository.replace_row_values([(str(item["row_id"]), values)])
+
+    async def _finalize_email_enrichment_run(self, run_id: str) -> None:
+        items = await self._repository.list_email_enrichment_run_items(run_id)
+        succeeded = sum(1 for item in items if item["status"] == "succeeded")
+        failed = sum(1 for item in items if item["status"] == "failed")
+        skipped = sum(1 for item in items if item["status"] == "skipped")
+        not_found = sum(1 for item in items if item["status"] == "not_found")
+        if failed and (succeeded or not_found):
+            status = "partial"
+        elif failed:
+            status = "failed"
+        else:
+            status = "succeeded"
+        await self._repository.update_email_enrichment_run(
+            run_id,
+            {
+                "status": status,
+                "succeeded_count": succeeded,
+                "failed_count": failed,
+                "skipped_count": skipped,
+                "not_found_count": not_found,
+                "total_count": len(items),
+                "completed_at": to_iso(utc_now()),
+            },
+        )
 
     async def _add_sheriff_column(
         self,
@@ -880,9 +1304,12 @@ def _validate_filters(
                 f"Filter column {item.column_id} was not found on this table"
             )
         column_type = column["type"]
-        if column_type == "sheriff" and item.operator != "is_empty":
+        if column_type in COMPUTED_COLUMN_TYPES and item.operator not in {
+            "is_empty",
+            "is_not_empty",
+        }:
             raise TableValidationError(
-                "sheriff columns only support is_empty filters"
+                f"{column_type} columns only support is_empty and is_not_empty filters"
             )
         if item.operator == "contains" and column_type != "text":
             raise TableValidationError("contains filters can only be used on text columns")
@@ -905,6 +1332,10 @@ def _row_matches_filters(
         empty = cell is None or cell == ""
         if item.operator == "is_empty":
             if not empty:
+                return False
+            continue
+        if item.operator == "is_not_empty":
+            if empty:
                 return False
             continue
         if empty:
@@ -953,7 +1384,7 @@ def _normalize_values(
         if column is None:
             raise TableValidationError(f"Unknown column {key}")
         column_type = column["type"]
-        if column_type == "sheriff":
+        if column_type in COMPUTED_COLUMN_TYPES:
             raise TableValidationError(
                 f"Column {column['name']} is computed and cannot be patched"
             )
@@ -1033,7 +1464,7 @@ def _resolve_input_columns(
         column_id = str(column["id"])
         if column_id in seen:
             return
-        if column["type"] == "sheriff":
+        if column["type"] in COMPUTED_COLUMN_TYPES:
             raise TableValidationError(
                 f"Column {column['name']} cannot be used as a sheriff input"
             )
@@ -1081,14 +1512,18 @@ def _interpolation_values(
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for column in columns:
-        if column["type"] == "sheriff":
+        if column["type"] in COMPUTED_COLUMN_TYPES:
             continue
         result[str(column["name"])] = stringify_cell(values.get(str(column["id"])))
     return result
 
 
 def _sheriff_column_names(columns: list[dict[str, Any]]) -> set[str]:
-    return {str(column["name"]) for column in columns if column["type"] == "sheriff"}
+    return {
+        str(column["name"])
+        for column in columns
+        if column["type"] in COMPUTED_COLUMN_TYPES
+    }
 
 
 def _sheriff_cell(
@@ -1136,3 +1571,95 @@ def _apply_research_output(
         else:
             values[child_id] = stored
     return cell_output, values
+
+
+def _email_enrichment_config_record(config: EmailEnrichmentConfig) -> dict[str, Any]:
+    return {
+        "providers": list(config.providers),
+        "validator": config.validator,
+        "first_name_column_id": str(config.first_name_column_id),
+        "last_name_column_id": str(config.last_name_column_id),
+        "linkedin_column_id": str(config.linkedin_column_id),
+        "company_name_column_id": str(config.company_name_column_id),
+        "company_domain_column_id": str(config.company_domain_column_id),
+    }
+
+
+def _parse_email_enrichment_config(raw: Any) -> EmailEnrichmentConfig:
+    if not isinstance(raw, dict):
+        raise TableValidationError("Email enrichment column is missing config")
+    return EmailEnrichmentConfig.model_validate(raw)
+
+
+def _validate_email_input_columns(
+    config: EmailEnrichmentConfig,
+    columns: list[dict[str, Any]],
+    parent_id: str | None = None,
+) -> None:
+    by_id = {str(column["id"]): column for column in columns}
+    labels = {
+        "first_name_column_id": config.first_name_column_id,
+        "last_name_column_id": config.last_name_column_id,
+        "linkedin_column_id": config.linkedin_column_id,
+        "company_name_column_id": config.company_name_column_id,
+        "company_domain_column_id": config.company_domain_column_id,
+    }
+    for label, column_id in labels.items():
+        column = by_id.get(str(column_id))
+        if column is None:
+            raise TableValidationError(f"Unknown input column {column_id}")
+        if parent_id is not None and str(column["id"]) == parent_id:
+            raise TableValidationError("email enrichment cannot map itself as an input")
+        if column["type"] != "text":
+            raise TableValidationError(
+                f"{label} must reference a text column ({column['name']})"
+            )
+        source_parent = str(column.get("source_column_id") or "")
+        if parent_id is not None and source_parent == parent_id:
+            raise TableValidationError(
+                "email enrichment cannot map its own child column as an input"
+            )
+
+
+def _email_inputs_from_row(
+    config: EmailEnrichmentConfig,
+    columns: list[dict[str, Any]],
+    values: dict[str, Any],
+) -> EmailInputs | None:
+    first_name = cell_text(values.get(str(config.first_name_column_id)))
+    last_name = cell_text(values.get(str(config.last_name_column_id)))
+    linkedin_raw = cell_text(values.get(str(config.linkedin_column_id)))
+    company_name = cell_text(values.get(str(config.company_name_column_id)))
+    domain_raw = values.get(str(config.company_domain_column_id))
+    domain = normalize_domain(domain_raw)
+    if not first_name or not last_name or not linkedin_raw or not company_name or not domain:
+        return None
+    return EmailInputs(
+        first_name=first_name,
+        last_name=last_name,
+        company_name=company_name,
+        domain=domain,
+        linkedin_url=person_linkedin(linkedin_raw) or linkedin_raw,
+    )
+
+
+def _email_enrichment_cell(
+    *,
+    status: str,
+    email: str | None = None,
+    provider: str | None = None,
+    validation_result: str | None = None,
+    rejected_emails: list[str] | None = None,
+    steps: list[WaterfallStep] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "email": email,
+        "provider": provider,
+        "validator": "millionverifier",
+        "validation_result": validation_result,
+        "rejected_emails": rejected_emails or [],
+        "steps": [step.as_dict() for step in steps or []],
+        "error": error,
+    }

@@ -27,6 +27,14 @@ from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
+from app.tables.email_enrichment import (
+    FullEnrichEmailClient,
+    IcypeasEmailClient,
+    KittEmailClient,
+    LeadMagicEmailClient,
+    MillionVerifierClient,
+    ProspeoEmailClient,
+)
 from app.tables.sheriff.perplexity import PerplexitySheriffAgent
 from app.tables.repository import TableRepository
 from app.tables.routes import router as tables_router
@@ -84,10 +92,75 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             perplexity_client,
             model=env.sheriff_model,
         )
+    email_timeout = httpx.Timeout(
+        connect=5.0,
+        read=env.email_provider_timeout_seconds,
+        write=10.0,
+        pool=5.0,
+    )
+    icypeas_http = httpx.AsyncClient(
+        base_url=env.icypeas_base_url.rstrip("/") + "/",
+        timeout=email_timeout,
+        headers={"Accept": "application/json"},
+    )
+    kitt_http = httpx.AsyncClient(
+        base_url=env.kitt_base_url.rstrip("/") + "/",
+        timeout=email_timeout,
+        headers={"Accept": "application/json"},
+    )
+    millionverifier_http = httpx.AsyncClient(
+        base_url=env.millionverifier_base_url.rstrip("/") + "/",
+        timeout=email_timeout,
+        headers={"Accept": "application/json"},
+    )
+    email_provider_options = {
+        "max_retries": env.phone_provider_max_retries,
+        "concurrency": env.email_enrichment_concurrency,
+    }
+    email_finders = {
+        "leadmagic": LeadMagicEmailClient(
+            leadmagic_http,
+            env.leadmagic_api_key.get_secret_value(),
+            **email_provider_options,
+        ),
+        "prospeo": ProspeoEmailClient(
+            prospeo_http,
+            env.prospeo_api_key.get_secret_value(),
+            **email_provider_options,
+        ),
+        "fullenrich": FullEnrichEmailClient(
+            fullenrich_http,
+            env.fullenrich_api_key.get_secret_value(),
+            poll_timeout_seconds=env.email_enrichment_fullenrich_poll_seconds,
+            **email_provider_options,
+        ),
+    }
+    if env.icypeas_api_key is not None:
+        email_finders["icypeas"] = IcypeasEmailClient(
+            icypeas_http,
+            env.icypeas_api_key.get_secret_value(),
+            **email_provider_options,
+        )
+    if env.kitt_api_key is not None:
+        email_finders["kitt"] = KittEmailClient(
+            kitt_http,
+            env.kitt_api_key.get_secret_value(),
+            **email_provider_options,
+        )
+    email_validator = None
+    if env.millionverifier_api_key is not None:
+        email_validator = MillionVerifierClient(
+            millionverifier_http,
+            env.millionverifier_api_key.get_secret_value(),
+            **email_provider_options,
+        )
     app.state.table_service = TableService(
         TableRepository(supabase),
         sheriff_agent=sheriff_agent,
         sheriff_concurrency=env.sheriff_concurrency,
+        email_finders=email_finders,
+        email_validator=email_validator,
+        email_concurrency=env.email_enrichment_concurrency,
     )
     app.state.smartlead = SmartLeadClient(
         smartlead_http,
@@ -134,6 +207,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await prospeo_http.aclose()
         await airscale_http.aclose()
         await fullenrich_http.aclose()
+        await icypeas_http.aclose()
+        await kitt_http.aclose()
+        await millionverifier_http.aclose()
         if perplexity_client is not None:
             await perplexity_client.close()
         if supabase._postgrest is not None:

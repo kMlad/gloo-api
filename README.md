@@ -123,10 +123,12 @@ via Supabase's invite confirmation flow.
 ## Tables
 
 Workbook-style tables are independent of CRM leads. Any signed-in user can
-create, import, and edit them. Column types are `text`, `boolean`, or
-`sheriff`. Empty `text`/`boolean` columns start blank; missing cells are
-returned as `null`. Sheriff columns are a reusable research prompt that writes
-typed fields back into auto-created child columns.
+create, import, and edit them. Column types are `text`, `boolean`,
+`sheriff`, or `email_enrichment`. Empty `text`/`boolean` columns start blank;
+missing cells are returned as `null`. Sheriff columns are a reusable research
+prompt that writes typed fields back into auto-created child columns. Email
+enrichment columns run a provider waterfall, validate candidates with
+MillionVerifier, and write a work email into an auto-created child column.
 
 Create an empty table:
 
@@ -170,9 +172,9 @@ Saved filters are applied on row reads. Replace them with
 `PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
 `PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
 Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
-patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff columns
-are not allowed on table create or CSV import — add them after input columns
-exist.
+patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff and
+email enrichment columns are not allowed on table create or CSV import — add
+them after input columns exist.
 
 Optional prompt helper (nothing is persisted):
 
@@ -234,5 +236,73 @@ Sheriff uses the Perplexity Agent API (`web_search` only) with
 Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
 (default `openai/gpt-5.4-mini`), `SHERIFF_TIMEOUT_SECONDS`,
 `SHERIFF_CONCURRENCY`.
+
+Create an email enrichment column after mapping first name, last name, LinkedIn
+URL, company name, and company domain/website columns. Providers default to
+Icypeas → Kitt → LeadMagic → Prospeo → FullEnrich; omit or reorder them as
+needed. The only validator is MillionVerifier, and only `ok` counts as valid.
+`catch_all` and other results are cached on the row so the same address is not
+re-verified later in the waterfall.
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Work email",
+    "type": "email_enrichment",
+    "email_enrichment": {
+      "providers": ["icypeas", "kitt", "leadmagic", "prospeo", "fullenrich"],
+      "validator": "millionverifier",
+      "first_name_column_id": "...",
+      "last_name_column_id": "...",
+      "linkedin_column_id": "...",
+      "company_name_column_id": "...",
+      "company_domain_column_id": "..."
+    }
+  }'
+```
+
+Runs use the same endpoint as sheriff:
+`POST /api/v1/tables/{table_id}/columns/{column_id}/runs`. A row is skipped when
+any mapped input is blank. `overwrite: false` skips rows whose parent cell
+`status` is `succeeded`. A succeeded cell includes the waterfall `steps` the UI
+can render, for example `Icypeas: found test@gmail.com (invalid)`:
+
+```json
+{
+  "status": "succeeded",
+  "email": "test1@gmail.com",
+  "provider": "prospeo",
+  "validator": "millionverifier",
+  "validation_result": "ok",
+  "rejected_emails": ["test@gmail.com"],
+  "steps": [
+    {
+      "provider": "icypeas",
+      "status": "found",
+      "emails": [{"email": "test@gmail.com", "validation": "invalid"}]
+    },
+    {
+      "provider": "kitt",
+      "status": "found",
+      "emails": [{"email": "test@gmail.com", "validation": "skipped"}]
+    },
+    {
+      "provider": "prospeo",
+      "status": "found",
+      "emails": [{"email": "test1@gmail.com", "validation": "valid"}]
+    }
+  ],
+  "error": null
+}
+```
+
+Email enrichment reuses `LEADMAGIC_API_KEY`, `PROSPEO_API_KEY`, and
+`FULLENRICH_API_KEY`. Optional keys: `ICYPEAS_API_KEY`, `KITT_API_KEY`,
+`MILLIONVERIFIER_API_KEY`. Runs without MillionVerifier return 503. Selected
+providers without a key are skipped. Optional tuning:
+`EMAIL_ENRICHMENT_CONCURRENCY` (default 3),
+`EMAIL_ENRICHMENT_FULLENRICH_POLL_SECONDS` (default 90).
 
 

@@ -129,12 +129,15 @@ async def test_table_routes_require_a_valid_user_jwt() -> None:
 def test_table_filter_schema_validates_operators() -> None:
     column_id = uuid4()
     assert TableFilter(column_id=column_id, operator="is_empty").value is None
+    assert TableFilter(column_id=column_id, operator="is_not_empty").value is None
     assert TableFilter(
         column_id=column_id, operator="contains", value="acme"
     ).operator == "contains"
     assert TableFilter(column_id=column_id, operator="eq", value=True).value is True
     with pytest.raises(ValidationError):
         TableFilter(column_id=column_id, operator="is_empty", value="x")
+    with pytest.raises(ValidationError):
+        TableFilter(column_id=column_id, operator="is_not_empty", value="x")
     with pytest.raises(ValidationError):
         TableFilter(column_id=column_id, operator="contains", value="")
     with pytest.raises(ValidationError):

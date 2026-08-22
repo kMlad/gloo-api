@@ -78,6 +78,14 @@ class SheriffServiceStub:
             "input_columns": [{"id": str(uuid4()), "name": "Company"}],
         }
 
+    async def get_column(self, table_id: str, column_id: str) -> dict[str, Any]:
+        return {
+            "id": column_id,
+            "table_id": table_id,
+            "name": "CEO",
+            "type": "sheriff",
+        }
+
     async def start_sheriff_run(
         self, table_id, column_id, payload, *, created_by: str
     ) -> dict[str, Any]:
@@ -96,6 +104,7 @@ class SheriffServiceStub:
             "succeeded_count": 0,
             "failed_count": 0,
             "skipped_count": 0,
+            "not_found_count": 0,
             "items": [
                 {
                     "id": str(uuid4()),
@@ -115,6 +124,9 @@ class SheriffServiceStub:
     async def execute_sheriff_run(self, run_id: str) -> None:
         self.executed.append(run_id)
 
+    async def get_column_run(self, table_id, column_id, run_id) -> dict[str, Any]:
+        return await self.get_sheriff_run(table_id, column_id, run_id)
+
     async def get_sheriff_run(self, table_id, column_id, run_id) -> dict[str, Any]:
         if run_id != self.run_id:
             raise TableNotFoundError("Run not found")
@@ -131,6 +143,7 @@ class SheriffServiceStub:
             "succeeded_count": 1,
             "failed_count": 0,
             "skipped_count": 0,
+            "not_found_count": 0,
             "items": [],
             "created_at": now,
             "updated_at": now,

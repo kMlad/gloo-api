@@ -16,6 +16,7 @@ from fastapi import (
 
 from app.auth import AuthenticatedUser, require_authenticated_user
 from app.dependencies import get_table_service
+from app.tables.email_enrichment import EmailEnrichmentUnavailableError
 from app.tables.sheriff import SheriffUnavailableError
 from app.tables.csv_import import CsvImportError
 from app.tables.schemas import (
@@ -63,7 +64,7 @@ def _map_table_error(error: Exception) -> HTTPException:
         return HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         )
-    if isinstance(error, SheriffUnavailableError):
+    if isinstance(error, (SheriffUnavailableError, EmailEnrichmentUnavailableError)):
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
         )
@@ -232,7 +233,7 @@ async def expand_sheriff_prompt(
     response_model=SheriffRunResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def start_sheriff_run(
+async def start_column_run(
     table_id: UUID,
     column_id: UUID,
     service: ServiceDependency,
@@ -240,35 +241,54 @@ async def start_sheriff_run(
     background_tasks: BackgroundTasks,
     payload: SheriffRunCreate | None = None,
 ) -> dict[str, Any]:
+    request = payload or SheriffRunCreate()
     try:
-        run = await service.start_sheriff_run(
-            str(table_id),
-            str(column_id),
-            payload or SheriffRunCreate(),
-            created_by=user.id,
+        column = await service.get_column(str(table_id), str(column_id))
+        column_type = column["type"]
+        if column_type == "sheriff":
+            run = await service.start_sheriff_run(
+                str(table_id),
+                str(column_id),
+                request,
+                created_by=user.id,
+            )
+            background_tasks.add_task(service.execute_sheriff_run, str(run["id"]))
+            return run
+        if column_type == "email_enrichment":
+            run = await service.start_email_enrichment_run(
+                str(table_id),
+                str(column_id),
+                request,
+                created_by=user.id,
+            )
+            background_tasks.add_task(
+                service.execute_email_enrichment_run, str(run["id"])
+            )
+            return run
+        raise TableValidationError(
+            "Runs are only supported on sheriff and email_enrichment columns"
         )
     except (
         TableNotFoundError,
         TableValidationError,
         SheriffUnavailableError,
+        EmailEnrichmentUnavailableError,
     ) as error:
         raise _map_table_error(error) from error
-    background_tasks.add_task(service.execute_sheriff_run, str(run["id"]))
-    return run
 
 
 @router.get(
     "/{table_id}/columns/{column_id}/runs/{run_id}",
     response_model=SheriffRunResponse,
 )
-async def get_sheriff_run(
+async def get_column_run(
     table_id: UUID,
     column_id: UUID,
     run_id: UUID,
     service: ServiceDependency,
 ) -> dict[str, Any]:
     try:
-        return await service.get_sheriff_run(
+        return await service.get_column_run(
             str(table_id), str(column_id), str(run_id)
         )
     except TableNotFoundError as error:

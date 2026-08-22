@@ -4,13 +4,19 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.tables.email_enrichment.protocol import DEFAULT_EMAIL_PROVIDERS, EMAIL_PROVIDERS
 from app.tables.sheriff.protocol import SheriffOutputField
 
-ColumnType = Literal["text", "boolean", "sheriff"]
-FilterOperator = Literal["eq", "contains", "is_empty"]
+ColumnType = Literal["text", "boolean", "sheriff", "email_enrichment"]
+EmailProvider = Literal["icypeas", "kitt", "leadmagic", "prospeo", "fullenrich"]
+EmailValidatorName = Literal["millionverifier"]
+FilterOperator = Literal["eq", "contains", "is_empty", "is_not_empty"]
 CellValue = str | bool | None
 SheriffRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
-SheriffRunItemStatus = Literal["queued", "running", "succeeded", "failed", "skipped"]
+SheriffRunItemStatus = Literal[
+    "queued", "running", "succeeded", "not_found", "failed", "skipped"
+]
+COMPUTED_COLUMN_TYPES = {"sheriff", "email_enrichment"}
 
 
 class TableFilter(BaseModel):
@@ -20,9 +26,9 @@ class TableFilter(BaseModel):
 
     @model_validator(mode="after")
     def validate_operator_value(self) -> "TableFilter":
-        if self.operator == "is_empty":
+        if self.operator in {"is_empty", "is_not_empty"}:
             if self.value is not None:
-                raise ValueError("is_empty filters must not include a value")
+                raise ValueError(f"{self.operator} filters must not include a value")
             return self
         if self.operator == "contains":
             if not isinstance(self.value, str) or not self.value:
@@ -64,10 +70,46 @@ class SheriffConfig(BaseModel):
         return self
 
 
+class EmailEnrichmentConfig(BaseModel):
+    providers: list[EmailProvider] = Field(default_factory=lambda: list(DEFAULT_EMAIL_PROVIDERS))
+    validator: EmailValidatorName = "millionverifier"
+    first_name_column_id: UUID
+    last_name_column_id: UUID
+    linkedin_column_id: UUID
+    company_name_column_id: UUID
+    company_domain_column_id: UUID
+
+    @field_validator("providers")
+    @classmethod
+    def unique_providers(cls, value: list[EmailProvider]) -> list[EmailProvider]:
+        if not value:
+            raise ValueError("providers must not be empty")
+        if len(set(value)) != len(value):
+            raise ValueError("providers must not contain duplicates")
+        unknown = [item for item in value if item not in EMAIL_PROVIDERS]
+        if unknown:
+            raise ValueError(f"unknown email providers: {', '.join(unknown)}")
+        return value
+
+    @model_validator(mode="after")
+    def unique_input_columns(self) -> "EmailEnrichmentConfig":
+        column_ids = [
+            self.first_name_column_id,
+            self.last_name_column_id,
+            self.linkedin_column_id,
+            self.company_name_column_id,
+            self.company_domain_column_id,
+        ]
+        if len(set(column_ids)) != len(column_ids):
+            raise ValueError("email enrichment input columns must be distinct")
+        return self
+
+
 class ColumnCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: ColumnType = "text"
     sheriff: SheriffConfig | None = None
+    email_enrichment: EmailEnrichmentConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -78,13 +120,25 @@ class ColumnCreate(BaseModel):
         return name
 
     @model_validator(mode="after")
-    def validate_sheriff(self) -> "ColumnCreate":
+    def validate_typed_config(self) -> "ColumnCreate":
         if self.type == "sheriff":
             if self.sheriff is None:
                 raise ValueError("sheriff columns require a sheriff config")
+            if self.email_enrichment is not None:
+                raise ValueError("email_enrichment config is only valid when type is email_enrichment")
+            return self
+        if self.type == "email_enrichment":
+            if self.email_enrichment is None:
+                raise ValueError("email_enrichment columns require an email_enrichment config")
+            if self.sheriff is not None:
+                raise ValueError("sheriff config is only valid when type is sheriff")
             return self
         if self.sheriff is not None:
             raise ValueError("sheriff config is only valid when type is sheriff")
+        if self.email_enrichment is not None:
+            raise ValueError(
+                "email_enrichment config is only valid when type is email_enrichment"
+            )
         return self
 
 
@@ -92,6 +146,7 @@ class ColumnUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     hidden: bool | None = None
     sheriff: SheriffConfig | None = None
+    email_enrichment: EmailEnrichmentConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -105,7 +160,12 @@ class ColumnUpdate(BaseModel):
 
     @model_validator(mode="after")
     def require_a_field(self) -> "ColumnUpdate":
-        if self.name is None and self.hidden is None and self.sheriff is None:
+        if (
+            self.name is None
+            and self.hidden is None
+            and self.sheriff is None
+            and self.email_enrichment is None
+        ):
             raise ValueError("at least one column field must be provided")
         return self
 
@@ -144,9 +204,9 @@ class TableCreate(BaseModel):
         names = [column.name for column in self.columns]
         if len(set(names)) != len(names):
             raise ValueError("column names must not contain duplicates")
-        if any(column.type == "sheriff" for column in self.columns):
+        if any(column.type in COMPUTED_COLUMN_TYPES for column in self.columns):
             raise ValueError(
-                "sheriff columns can only be added after the table exists"
+                "sheriff and email_enrichment columns can only be added after the table exists"
             )
         return self
 
@@ -298,6 +358,7 @@ class SheriffRunResponse(BaseModel):
     succeeded_count: int
     failed_count: int
     skipped_count: int
+    not_found_count: int = 0
     items: list[SheriffRunItemResponse]
     created_at: datetime
     updated_at: datetime

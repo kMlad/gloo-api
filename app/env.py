@@ -57,10 +57,25 @@ class Env(BaseSettings):
     sheriff_model: str = "openai/gpt-5.4-mini"
     sheriff_timeout_seconds: float = Field(default=60.0, gt=0)
     sheriff_concurrency: int = Field(default=3, ge=1, le=20)
+    icypeas_api_key: SecretStr | None = None
+    kitt_api_key: SecretStr | None = None
+    millionverifier_api_key: SecretStr | None = None
+    icypeas_base_url: str = "https://app.icypeas.com"
+    kitt_base_url: str = "https://api.trykitt.ai"
+    millionverifier_base_url: str = "https://api.millionverifier.com"
+    email_enrichment_concurrency: int = Field(default=3, ge=1, le=20)
+    email_enrichment_fullenrich_poll_seconds: float = Field(default=90.0, gt=0)
+    email_provider_timeout_seconds: float = Field(default=30.0, gt=0)
 
-    @field_validator("perplexity_api_key", mode="before")
+    @field_validator(
+        "perplexity_api_key",
+        "icypeas_api_key",
+        "kitt_api_key",
+        "millionverifier_api_key",
+        mode="before",
+    )
     @classmethod
-    def empty_perplexity_key(cls, value: object) -> object:
+    def empty_optional_secret(cls, value: object) -> object:
         if value is None or value == "":
             return None
         if isinstance(value, SecretStr) and not value.get_secret_value():

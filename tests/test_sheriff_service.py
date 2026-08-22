@@ -501,13 +501,20 @@ async def test_sheriff_parent_only_supports_is_empty_filter() -> None:
     )
     created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    with pytest.raises(TableValidationError, match="is_empty"):
+    with pytest.raises(TableValidationError, match="is_empty and is_not_empty"):
         await service.replace_filters(
             table["id"],
             TableFiltersUpdate(
                 filters=[TableFilter(column_id=parent["id"], operator="eq", value="x")]
             ),
         )
+    updated = await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[TableFilter(column_id=parent["id"], operator="is_not_empty")]
+        ),
+    )
+    assert updated["filters"][0].operator == "is_not_empty"
 
 
 @pytest.mark.asyncio

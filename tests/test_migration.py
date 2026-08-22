@@ -167,3 +167,33 @@ def test_perplexity_usage_migration_is_private_and_split() -> None:
     )
     assert "to anon" not in migration
     assert "to authenticated" not in migration
+
+
+def test_email_enrichment_columns_migration_is_private_and_typed() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_email_enrichment_columns.sql")
+    ).read_text()
+    assert "check (type in ('text', 'boolean', 'sheriff', 'email_enrichment'))" in migration
+    assert "table_columns_computed_config_check" in migration
+    assert "type in ('sheriff', 'email_enrichment')" in migration
+    tables = [
+        "table_email_enrichment_runs",
+        "table_email_enrichment_run_items",
+        "table_email_enrichment_attempts",
+    ]
+    for table in tables:
+        assert f"alter table public.{table} enable row level security" in migration
+        assert (
+            f"revoke all on table public.{table} from public, anon, authenticated"
+            in migration
+        )
+        assert f"revoke all on table public.{table} from service_role" in migration
+        assert (
+            f"grant select, insert, update, delete on table public.{table} to service_role"
+            in migration
+        )
+    assert "not_found_count integer not null default 0" in migration
+    assert "millionverifier" in migration
+    assert "skipped_cached" in migration
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration

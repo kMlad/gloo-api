@@ -1,0 +1,174 @@
+import pytest
+
+from app.tables.email_enrichment.protocol import (
+    EmailInputs,
+    FindEmailResult,
+    ValidationResult,
+)
+from app.tables.email_enrichment.waterfall import run_waterfall
+
+_INPUTS = EmailInputs(
+    first_name="Ada",
+    last_name="Lovelace",
+    company_name="Acme",
+    domain="acme.com",
+    linkedin_url="https://www.linkedin.com/in/ada",
+)
+
+
+class FakeFinder:
+    def __init__(self, *results: FindEmailResult) -> None:
+        self.calls = 0
+        self._results = list(results)
+
+    async def find_email(self, inputs: EmailInputs) -> FindEmailResult:
+        self.calls += 1
+        return self._results[min(self.calls - 1, len(self._results) - 1)]
+
+
+class FakeValidator:
+    def __init__(self, results: dict[str, str]) -> None:
+        self.calls: list[str] = []
+        self._results = results
+
+    async def verify(self, email: str) -> ValidationResult:
+        self.calls.append(email)
+        result = self._results[email]
+        return ValidationResult(
+            status="ok" if result == "ok" else "invalid",
+            request_payload={"email": email},
+            result=result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_waterfall_writes_first_ok_email_and_stops() -> None:
+    icypeas = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])
+    )
+    kitt = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["skip@acme.com"])
+    )
+    validator = FakeValidator({"ada@acme.com": "ok"})
+    outcome = await run_waterfall(
+        providers=["icypeas", "kitt"],
+        finders={"icypeas": icypeas, "kitt": kitt},
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "succeeded"
+    assert outcome.email == "ada@acme.com"
+    assert outcome.provider == "icypeas"
+    assert kitt.calls == 0
+    assert validator.calls == ["ada@acme.com"]
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": "ada@acme.com", "validation": "valid"}],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waterfall_caches_invalid_email_and_skips_millionverifier() -> None:
+    leadmagic = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["bad@acme.com"])
+    )
+    prospeo = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["bad@acme.com"])
+    )
+    fullenrich = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])
+    )
+    validator = FakeValidator({"bad@acme.com": "catch_all", "ada@acme.com": "ok"})
+    outcome = await run_waterfall(
+        providers=["leadmagic", "prospeo", "fullenrich"],
+        finders={
+            "leadmagic": leadmagic,
+            "prospeo": prospeo,
+            "fullenrich": fullenrich,
+        },
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "succeeded"
+    assert outcome.email == "ada@acme.com"
+    assert outcome.provider == "fullenrich"
+    assert outcome.rejected_emails == ["bad@acme.com"]
+    assert validator.calls == ["bad@acme.com", "ada@acme.com"]
+    cached = [attempt for attempt in outcome.attempts if attempt.status == "skipped_cached"]
+    assert len(cached) == 1
+    assert cached[0].provider == "millionverifier"
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "leadmagic",
+            "status": "found",
+            "emails": [{"email": "bad@acme.com", "validation": "invalid"}],
+        },
+        {
+            "provider": "prospeo",
+            "status": "found",
+            "emails": [{"email": "bad@acme.com", "validation": "skipped"}],
+        },
+        {
+            "provider": "fullenrich",
+            "status": "found",
+            "emails": [{"email": "ada@acme.com", "validation": "valid"}],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waterfall_skips_unconfigured_provider_and_omitted_provider() -> None:
+    kitt = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])
+    )
+    leadmagic = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["other@acme.com"])
+    )
+    validator = FakeValidator({"ada@acme.com": "ok"})
+    outcome = await run_waterfall(
+        providers=["icypeas", "kitt"],
+        finders={"kitt": kitt, "leadmagic": leadmagic},
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "succeeded"
+    assert outcome.provider == "kitt"
+    assert leadmagic.calls == 0
+    assert outcome.attempts[0].status == "skipped_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_waterfall_not_found_when_nothing_validates() -> None:
+    finder = FakeFinder(FindEmailResult(status="not_found", request_payload={}))
+    validator = FakeValidator({})
+    outcome = await run_waterfall(
+        providers=["icypeas"],
+        finders={"icypeas": finder},
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "not_found"
+    assert outcome.email is None
+    assert validator.calls == []
+    assert [step.as_dict() for step in outcome.steps] == [
+        {"provider": "icypeas", "status": "not_found", "emails": []}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waterfall_failed_when_every_provider_errors() -> None:
+    finder = FakeFinder(
+        FindEmailResult(status="failed", request_payload={}, error_message="boom")
+    )
+    validator = FakeValidator({})
+    outcome = await run_waterfall(
+        providers=["icypeas"],
+        finders={"icypeas": finder},
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "failed"
+    assert outcome.error == "All enrichment providers failed"

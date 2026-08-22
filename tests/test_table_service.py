@@ -38,6 +38,9 @@ class FakeTableRepository:
         self.rows: dict[str, dict] = {}
         self.runs: dict[str, dict] = {}
         self.run_items: dict[str, dict] = {}
+        self.email_runs: dict[str, dict] = {}
+        self.email_run_items: dict[str, dict] = {}
+        self.email_attempts: list[dict] = []
         self.perplexity_usage: list[dict] = []
         self.fail_usage_insert = False
 
@@ -110,6 +113,12 @@ class FakeTableRepository:
                 for item_id, item in list(self.run_items.items()):
                     if item["run_id"] == run_id:
                         del self.run_items[item_id]
+        for run_id, run in list(self.email_runs.items()):
+            if run["table_id"] == table_id:
+                del self.email_runs[run_id]
+                for item_id, item in list(self.email_run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.email_run_items[item_id]
         return existed
 
     async def list_columns(self, table_id: str) -> list[dict]:
@@ -189,6 +198,12 @@ class FakeTableRepository:
                 for item_id, item in list(self.run_items.items()):
                     if item["run_id"] == run_id:
                         del self.run_items[item_id]
+        for run_id, run in list(self.email_runs.items()):
+            if run["column_id"] == column_id:
+                del self.email_runs[run_id]
+                for item_id, item in list(self.email_run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.email_run_items[item_id]
         return existed
 
     async def max_column_position(self, table_id: str) -> int | None:
@@ -308,6 +323,69 @@ class FakeTableRepository:
         self.perplexity_usage.append(stored)
         return deepcopy(stored)
 
+    async def insert_email_enrichment_run(self, record: dict) -> dict:
+        run_id = record.get("id") or str(uuid4())
+        stored = {**record, "id": run_id}
+        self.email_runs[run_id] = stored
+        return deepcopy(stored)
+
+    async def update_email_enrichment_run(self, run_id: str, values: dict) -> dict | None:
+        run = self.email_runs.get(run_id)
+        if run is None:
+            return None
+        run.update(values)
+        run["updated_at"] = _now()
+        return deepcopy(run)
+
+    async def get_email_enrichment_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict | None:
+        run = self.email_runs.get(run_id)
+        if run is None:
+            return None
+        if run["table_id"] != table_id or run["column_id"] != column_id:
+            return None
+        return deepcopy(run)
+
+    async def get_email_enrichment_run_by_id(self, run_id: str) -> dict | None:
+        run = self.email_runs.get(run_id)
+        return deepcopy(run) if run else None
+
+    async def insert_email_enrichment_run_items(self, items: list[dict]) -> list[dict]:
+        inserted = []
+        for item in items:
+            item_id = item.get("id") or str(uuid4())
+            stored = {**item, "id": item_id}
+            self.email_run_items[item_id] = stored
+            inserted.append(deepcopy(stored))
+        return inserted
+
+    async def list_email_enrichment_run_items(self, run_id: str) -> list[dict]:
+        items = [
+            deepcopy(item)
+            for item in self.email_run_items.values()
+            if item["run_id"] == run_id
+        ]
+        return sorted(items, key=lambda item: (item["created_at"], item["id"]))
+
+    async def update_email_enrichment_run_item(
+        self, item_id: str, values: dict
+    ) -> dict | None:
+        item = self.email_run_items.get(item_id)
+        if item is None:
+            return None
+        item.update(values)
+        item["updated_at"] = _now()
+        return deepcopy(item)
+
+    async def insert_email_enrichment_attempts(self, attempts: list[dict]) -> list[dict]:
+        stored = []
+        for attempt in attempts:
+            record = {**attempt, "id": attempt.get("id") or str(uuid4())}
+            self.email_attempts.append(record)
+            stored.append(deepcopy(record))
+        return stored
+
     def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
         for existing in self.columns.values():
             if existing["id"] == ignore_id:
@@ -326,9 +404,19 @@ class FakeTableRepository:
                 raise _unique_error()
 
 
-def _service(agent=None) -> tuple[TableService, FakeTableRepository]:
+def _service(
+    agent=None, *, email_finders=None, email_validator=None
+) -> tuple[TableService, FakeTableRepository]:
     repository = FakeTableRepository()
-    return TableService(repository, sheriff_agent=agent), repository
+    return (
+        TableService(
+            repository,
+            sheriff_agent=agent,
+            email_finders=email_finders,
+            email_validator=email_validator,
+        ),
+        repository,
+    )
 
 
 @pytest.mark.asyncio
@@ -372,7 +460,7 @@ async def test_reorder_columns_persists_positions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_filters_eq_contains_and_is_empty() -> None:
+async def test_filters_eq_contains_is_empty_and_is_not_empty() -> None:
     service, _repository = _service()
     table = await service.create_table(
         TableCreate(
@@ -418,6 +506,32 @@ async def test_filters_eq_contains_and_is_empty() -> None:
     matched = await service.list_rows(table["id"], limit=100, offset=0)
     assert matched["total"] == 1
     assert matched["items"][0]["values"][str(company_id)] == "Globex"
+
+    await service.add_row(table["id"], RowCreate(values={}))
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[TableFilter(column_id=company_id, operator="is_not_empty")]
+        ),
+    )
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert [item["values"][str(company_id)] for item in matched["items"]] == [
+        "Acme",
+        "Globex",
+        "Initech",
+    ]
+
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[TableFilter(column_id=active_id, operator="is_not_empty")]
+        ),
+    )
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert [item["values"][str(company_id)] for item in matched["items"]] == [
+        "Acme",
+        "Initech",
+    ]
 
     with pytest.raises(TableValidationError, match="contains"):
         await service.replace_filters(
