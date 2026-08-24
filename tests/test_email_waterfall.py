@@ -172,3 +172,101 @@ async def test_waterfall_failed_when_every_provider_errors() -> None:
     )
     assert outcome.status == "failed"
     assert outcome.error == "All enrichment providers failed"
+
+
+@pytest.mark.asyncio
+async def test_waterfall_rejects_catchall_when_flag_off() -> None:
+    finder = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])
+    )
+    validator = FakeValidator({"ada@acme.com": "catch_all"})
+    outcome = await run_waterfall(
+        providers=["icypeas"],
+        finders={"icypeas": finder},
+        validator=validator,
+        inputs=_INPUTS,
+    )
+    assert outcome.status == "not_found"
+    assert outcome.email is None
+    assert outcome.rejected_emails == ["ada@acme.com"]
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": "ada@acme.com", "validation": "invalid"}],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waterfall_prefers_ok_over_earlier_catchall() -> None:
+    icypeas = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["catch@acme.com"])
+    )
+    kitt = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])
+    )
+    validator = FakeValidator({"catch@acme.com": "catch_all", "ada@acme.com": "ok"})
+    outcome = await run_waterfall(
+        providers=["icypeas", "kitt"],
+        finders={"icypeas": icypeas, "kitt": kitt},
+        validator=validator,
+        inputs=_INPUTS,
+        accept_catchall=True,
+    )
+    assert outcome.status == "succeeded"
+    assert outcome.email == "ada@acme.com"
+    assert outcome.provider == "kitt"
+    assert outcome.validation_result == "ok"
+    assert outcome.rejected_emails == ["catch@acme.com"]
+    assert kitt.calls == 1
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": "catch@acme.com", "validation": "invalid"}],
+        },
+        {
+            "provider": "kitt",
+            "status": "found",
+            "emails": [{"email": "ada@acme.com", "validation": "valid"}],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waterfall_falls_back_to_first_catchall() -> None:
+    icypeas = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["first@acme.com"])
+    )
+    kitt = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["second@acme.com"])
+    )
+    validator = FakeValidator(
+        {"first@acme.com": "catch_all", "second@acme.com": "catch_all"}
+    )
+    outcome = await run_waterfall(
+        providers=["icypeas", "kitt"],
+        finders={"icypeas": icypeas, "kitt": kitt},
+        validator=validator,
+        inputs=_INPUTS,
+        accept_catchall=True,
+    )
+    assert outcome.status == "succeeded"
+    assert outcome.email == "first@acme.com"
+    assert outcome.provider == "icypeas"
+    assert outcome.validation_result == "catch_all"
+    assert outcome.rejected_emails == ["second@acme.com"]
+    assert kitt.calls == 1
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": "first@acme.com", "validation": "valid"}],
+        },
+        {
+            "provider": "kitt",
+            "status": "found",
+            "emails": [{"email": "second@acme.com", "validation": "invalid"}],
+        },
+    ]

@@ -73,6 +73,7 @@ class SheriffConfig(BaseModel):
 class EmailEnrichmentConfig(BaseModel):
     providers: list[EmailProvider] = Field(default_factory=lambda: list(DEFAULT_EMAIL_PROVIDERS))
     validator: EmailValidatorName = "millionverifier"
+    accept_catchall: bool = False
     first_name_column_id: UUID
     last_name_column_id: UUID
     linkedin_column_id: UUID

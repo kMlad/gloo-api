@@ -231,8 +231,11 @@ class TableService:
                 raise TableValidationError(
                     "email_enrichment config is only valid on email_enrichment columns"
                 )
-            _validate_email_input_columns(payload.email_enrichment, columns, column_id)
-            config = _email_enrichment_config_record(payload.email_enrichment)
+            email_config = _resolve_email_enrichment_patch(
+                payload.email_enrichment, column.get("config")
+            )
+            _validate_email_input_columns(email_config, columns, column_id)
+            config = _email_enrichment_config_record(email_config)
         try:
             updated = await self._repository.update_column(
                 column_id,
@@ -245,6 +248,12 @@ class TableService:
         if updated is None:
             raise TableNotFoundError("Column not found")
         await self._repository.update_table(table_id)
+        if (
+            payload.email_enrichment is not None
+            and config is not None
+            and config.get("accept_catchall")
+        ):
+            await self._reclassify_catchall_rows(table_id, column_id, columns)
         if added_children:
             return await self.get_table(table_id)
         return _column_response(updated)
@@ -813,6 +822,7 @@ class TableService:
                 validator=validator,
                 inputs=inputs,
                 rejected_emails=rejected,
+                accept_catchall=config.accept_catchall,
             )
         except Exception as error:
             values[column_id] = _email_enrichment_cell(
@@ -849,6 +859,88 @@ class TableService:
             item_id=item_id,
             attempts=outcome.attempts,
         )
+
+    async def _reclassify_catchall_rows(
+        self,
+        table_id: str,
+        column_id: str,
+        columns: list[dict[str, Any]],
+    ) -> None:
+        rows = await self._repository.list_all_rows(table_id)
+        not_found: list[dict[str, Any]] = []
+        for row in rows:
+            cell = (row.get("values") or {}).get(column_id)
+            if isinstance(cell, dict) and cell.get("status") == "not_found":
+                not_found.append(row)
+        if not not_found:
+            return
+        runs = await self._repository.list_email_enrichment_runs_for_column(column_id)
+        if not runs:
+            return
+        run_ids = [str(run["id"]) for run in runs]
+        items = await self._repository.list_email_enrichment_run_items_for_runs(run_ids)
+        attempts = await self._repository.list_email_enrichment_catchall_attempts(run_ids)
+        if not attempts:
+            return
+        item_row = {str(item["id"]): str(item["row_id"]) for item in items}
+        run_created = {
+            str(run["id"]): str(run.get("created_at") or "") for run in runs
+        }
+        by_row: dict[str, list[dict[str, Any]]] = {}
+        for attempt in attempts:
+            row_id = item_row.get(str(attempt.get("item_id") or ""))
+            if not row_id or not attempt.get("email_candidate"):
+                continue
+            by_row.setdefault(row_id, []).append(attempt)
+        child = next(
+            (
+                column
+                for column in columns
+                if str(column.get("source_column_id") or "") == column_id
+                and column.get("source_field") == "email"
+            ),
+            None,
+        )
+        updates: list[tuple[str, dict[str, Any]]] = []
+        for row in not_found:
+            row_id = str(row["id"])
+            row_attempts = by_row.get(row_id)
+            if not row_attempts:
+                continue
+            latest_run_id = str(
+                max(
+                    row_attempts,
+                    key=lambda item: (
+                        run_created.get(str(item.get("run_id") or ""), ""),
+                        str(item.get("run_id") or ""),
+                    ),
+                ).get("run_id")
+                or ""
+            )
+            latest = [
+                item
+                for item in row_attempts
+                if str(item.get("run_id") or "") == latest_run_id
+            ]
+            first = min(latest, key=lambda item: int(item.get("sequence") or 0))
+            email = first.get("email_candidate")
+            if not isinstance(email, str) or not email:
+                continue
+            values = dict(row.get("values") or {})
+            cell = values.get(column_id)
+            if not isinstance(cell, dict):
+                continue
+            provider = _provider_for_email(cell, email)
+            if provider is None:
+                continue
+            values[column_id] = _promote_catchall_cell(
+                cell, email=email, provider=provider
+            )
+            if child is not None:
+                values[str(child["id"])] = email
+            updates.append((row_id, values))
+        if updates:
+            await self._repository.replace_row_values(updates)
 
     async def _persist_email_attempts(
         self, *, run_id: str, item_id: str, attempts: list[AttemptRecord]
@@ -1577,11 +1669,73 @@ def _email_enrichment_config_record(config: EmailEnrichmentConfig) -> dict[str, 
     return {
         "providers": list(config.providers),
         "validator": config.validator,
+        "accept_catchall": config.accept_catchall,
         "first_name_column_id": str(config.first_name_column_id),
         "last_name_column_id": str(config.last_name_column_id),
         "linkedin_column_id": str(config.linkedin_column_id),
         "company_name_column_id": str(config.company_name_column_id),
         "company_domain_column_id": str(config.company_domain_column_id),
+    }
+
+
+def _resolve_email_enrichment_patch(
+    payload: EmailEnrichmentConfig, stored_raw: Any
+) -> EmailEnrichmentConfig:
+    stored_accept = False
+    if isinstance(stored_raw, dict):
+        stored_accept = bool(stored_raw.get("accept_catchall", False))
+    if "accept_catchall" not in payload.model_fields_set:
+        return payload.model_copy(update={"accept_catchall": stored_accept})
+    if stored_accept and not payload.accept_catchall:
+        raise TableValidationError("accept_catchall cannot be turned off")
+    return payload
+
+
+def _provider_for_email(cell: dict[str, Any], email: str) -> str | None:
+    for step in cell.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for item in step.get("emails") or []:
+            if isinstance(item, dict) and item.get("email") == email:
+                provider = step.get("provider")
+                return provider if isinstance(provider, str) and provider else None
+    return None
+
+
+def _promote_catchall_cell(
+    cell: dict[str, Any], *, email: str, provider: str
+) -> dict[str, Any]:
+    rejected = [
+        item for item in (cell.get("rejected_emails") or []) if item != email
+    ]
+    steps: list[dict[str, Any]] = []
+    marked = False
+    for step in cell.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        emails: list[dict[str, Any]] = []
+        for item in step.get("emails") or []:
+            if not isinstance(item, dict):
+                continue
+            if (
+                not marked
+                and item.get("email") == email
+                and item.get("validation") == "invalid"
+            ):
+                emails.append({**item, "validation": "valid"})
+                marked = True
+            else:
+                emails.append(item)
+        steps.append({**step, "emails": emails})
+    return {
+        "status": "succeeded",
+        "email": email,
+        "provider": provider,
+        "validator": cell.get("validator") or "millionverifier",
+        "validation_result": "catch_all",
+        "rejected_emails": rejected,
+        "steps": steps,
+        "error": None,
     }
 
 

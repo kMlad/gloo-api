@@ -21,6 +21,7 @@ async def run_waterfall(
     validator: EmailValidator,
     inputs: EmailInputs,
     rejected_emails: list[str] | None = None,
+    accept_catchall: bool = False,
 ) -> WaterfallOutcome:
     rejected = {email_cache_key(item) for item in rejected_emails or []}
     rejected_order = list(rejected_emails or [])
@@ -29,6 +30,8 @@ async def run_waterfall(
     sequence = 0
     lookups = 0
     hard_errors = 0
+    fallback_email: str | None = None
+    fallback_provider: str | None = None
 
     for provider in providers:
         finder = finders.get(provider)
@@ -78,7 +81,7 @@ async def run_waterfall(
                 continue
             sequence += 1
             verification = await validator.verify(email)
-            valid = verification.status == "ok" or verification.result == "ok"
+            valid = _is_ok(verification)
             attempts.append(
                 _validator_attempt(sequence, email, verification, valid)
             )
@@ -102,8 +105,28 @@ async def run_waterfall(
             if cache_key not in rejected:
                 rejected.add(cache_key)
                 rejected_order.append(email)
+                if (
+                    accept_catchall
+                    and _is_catchall(verification)
+                    and fallback_email is None
+                ):
+                    fallback_email = email
+                    fallback_provider = provider
         steps.append(step)
 
+    if fallback_email is not None and fallback_provider is not None:
+        _mark_email_valid(steps, fallback_email)
+        return WaterfallOutcome(
+            status="succeeded",
+            email=fallback_email,
+            provider=fallback_provider,
+            validation_result="catch_all",
+            rejected_emails=[
+                item for item in rejected_order if item != fallback_email
+            ],
+            attempts=attempts,
+            steps=steps,
+        )
     if lookups == 0 and hard_errors > 0:
         return WaterfallOutcome(
             status="failed",
@@ -118,6 +141,22 @@ async def run_waterfall(
         attempts=attempts,
         steps=steps,
     )
+
+
+def _is_ok(result: ValidationResult) -> bool:
+    return result.status == "ok" or result.result == "ok"
+
+
+def _is_catchall(result: ValidationResult) -> bool:
+    return result.result == "catch_all"
+
+
+def _mark_email_valid(steps: list[WaterfallStep], email: str) -> None:
+    for step in steps:
+        for item in step.emails:
+            if item.email == email and item.validation == "invalid":
+                item.validation = "valid"
+                return
 
 
 def _email_validation(result: ValidationResult, valid: bool) -> str:

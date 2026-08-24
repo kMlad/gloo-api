@@ -430,6 +430,53 @@ class TableRepository:
         )
         return response.data
 
+    async def list_email_enrichment_runs_for_column(
+        self, column_id: str
+    ) -> list[dict[str, Any]]:
+        response = await (
+            self._db.table("table_email_enrichment_runs")
+            .select("*")
+            .eq("column_id", column_id)
+            .order("created_at", desc=True)
+            .order("id", desc=True)
+            .execute()
+        )
+        return response.data
+
+    async def list_email_enrichment_run_items_for_runs(
+        self, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not run_ids:
+            return []
+        items: list[dict[str, Any]] = []
+        for group in chunks(run_ids, _ROW_LIST_CHUNK):
+            response = await (
+                self._db.table("table_email_enrichment_run_items")
+                .select("*")
+                .in_("run_id", group)
+                .execute()
+            )
+            items.extend(response.data)
+        return items
+
+    async def list_email_enrichment_catchall_attempts(
+        self, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not run_ids:
+            return []
+        attempts: list[dict[str, Any]] = []
+        for group in chunks(run_ids, _ROW_LIST_CHUNK):
+            response = await (
+                self._db.table("table_email_enrichment_attempts")
+                .select("*")
+                .in_("run_id", group)
+                .eq("validation_result", "catch_all")
+                .order("sequence")
+                .execute()
+            )
+            attempts.extend(response.data)
+        return attempts
+
 
 def is_unique_violation(error: APIError) -> bool:
     return error.code == "23505"

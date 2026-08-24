@@ -6,6 +6,7 @@ from app.tables.email_enrichment import EmailEnrichmentUnavailableError
 from app.tables.email_enrichment.protocol import FindEmailResult, ValidationResult
 from app.tables.schemas import (
     ColumnCreate,
+    ColumnUpdate,
     EmailEnrichmentConfig,
     RowCreate,
     RowUpdate,
@@ -86,6 +87,19 @@ def _enrichment_payload(ids: dict[str, str], **overrides) -> ColumnCreate:
     return ColumnCreate.model_validate(values)
 
 
+def _column_ids(ids: dict[str, str], **overrides) -> EmailEnrichmentConfig:
+    values = {
+        "providers": ["icypeas"],
+        "first_name_column_id": ids["First name"],
+        "last_name_column_id": ids["Last name"],
+        "linkedin_column_id": ids["LinkedIn"],
+        "company_name_column_id": ids["Company"],
+        "company_domain_column_id": ids["Domain"],
+    }
+    values.update(overrides)
+    return EmailEnrichmentConfig.model_validate(values)
+
+
 @pytest.mark.asyncio
 async def test_email_enrichment_column_creates_child_and_rejects_table_create() -> None:
     service, _repository = _service(email_validator=FakeValidator())
@@ -111,6 +125,7 @@ async def test_email_enrichment_column_creates_child_and_rejects_table_create() 
         "prospeo",
         "fullenrich",
     ]
+    assert parent["config"]["accept_catchall"] is False
 
     with pytest.raises(ValueError, match="after the table exists"):
         TableCreate.model_validate(
@@ -466,3 +481,190 @@ async def test_email_enrichment_filters_only_support_is_empty() -> None:
         ),
     )
     assert updated["filters"][0].operator == "is_not_empty"
+
+
+@pytest.mark.asyncio
+async def test_email_enrichment_create_stores_accept_catchall() -> None:
+    service, _repository = _service(email_validator=FakeValidator())
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    assert parent["config"]["accept_catchall"] is True
+
+
+@pytest.mark.asyncio
+async def test_email_enrichment_patch_promotes_catchall_without_rerunning() -> None:
+    finder = FakeFinder(emails=["ada@acme.com"])
+    validator = FakeValidator("catch_all")
+    service, _repository = _service(
+        email_finders={"icypeas": finder},
+        email_validator=validator,
+    )
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(ids, email_enrichment=_column_ids(ids)),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    child = next(
+        column
+        for column in created["columns"]
+        if str(column.get("source_column_id") or "") == str(parent["id"])
+    )
+    missing = await service.add_row(
+        table["id"],
+        RowCreate(
+            values={
+                ids["First name"]: "Ada",
+                ids["Last name"]: "Lovelace",
+                ids["LinkedIn"]: "https://www.linkedin.com/in/ada",
+                ids["Company"]: "Acme",
+                ids["Domain"]: "acme.com",
+            }
+        ),
+    )
+    first = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(row_ids=[missing["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(first["id"]))
+
+    validator.result = "ok"
+    valid = await service.add_row(
+        table["id"],
+        RowCreate(
+            values={
+                ids["First name"]: "Grace",
+                ids["Last name"]: "Hopper",
+                ids["LinkedIn"]: "https://www.linkedin.com/in/grace",
+                ids["Company"]: "Acme",
+                ids["Domain"]: "acme.com",
+            }
+        ),
+    )
+    second = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(row_ids=[valid["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(second["id"]))
+    assert finder.calls == 2
+    assert validator.calls == ["ada@acme.com", "ada@acme.com"]
+
+    updated = await service.update_column(
+        table["id"],
+        str(parent["id"]),
+        ColumnUpdate(email_enrichment=_column_ids(ids, accept_catchall=True)),
+    )
+    assert updated["config"]["accept_catchall"] is True
+    assert finder.calls == 2
+    assert validator.calls == ["ada@acme.com", "ada@acme.com"]
+
+    rows = {
+        row["id"]: row
+        for row in (await service.list_rows(table["id"], limit=10, offset=0))["items"]
+    }
+    promoted = rows[missing["id"]]["values"][str(parent["id"])]
+    assert promoted["status"] == "succeeded"
+    assert promoted["email"] == "ada@acme.com"
+    assert promoted["provider"] == "icypeas"
+    assert promoted["validation_result"] == "catch_all"
+    assert promoted["rejected_emails"] == []
+    assert promoted["steps"] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": "ada@acme.com", "validation": "valid"}],
+        }
+    ]
+    assert rows[missing["id"]]["values"][str(child["id"])] == "ada@acme.com"
+
+    kept = rows[valid["id"]]["values"][str(parent["id"])]
+    assert kept["status"] == "succeeded"
+    assert kept["validation_result"] == "ok"
+    assert kept["email"] == "ada@acme.com"
+
+
+@pytest.mark.asyncio
+async def test_email_enrichment_patch_cannot_turn_off_accept_catchall() -> None:
+    service, _repository = _service(email_validator=FakeValidator())
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    with pytest.raises(TableValidationError, match="cannot be turned off"):
+        await service.update_column(
+            table["id"],
+            str(parent["id"]),
+            ColumnUpdate(email_enrichment=_column_ids(ids, accept_catchall=False)),
+        )
+    omitted = await service.update_column(
+        table["id"],
+        str(parent["id"]),
+        ColumnUpdate(email_enrichment=_column_ids(ids)),
+    )
+    assert omitted["config"]["accept_catchall"] is True
+
+
+@pytest.mark.asyncio
+async def test_email_enrichment_run_falls_back_to_catchall() -> None:
+    finder = FakeFinder(emails=["ada@acme.com"])
+    validator = FakeValidator("catch_all")
+    service, _repository = _service(
+        email_finders={"icypeas": finder},
+        email_validator=validator,
+    )
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    child = next(
+        column
+        for column in created["columns"]
+        if str(column.get("source_column_id") or "") == str(parent["id"])
+    )
+    row = await service.add_row(
+        table["id"],
+        RowCreate(
+            values={
+                ids["First name"]: "Ada",
+                ids["Last name"]: "Lovelace",
+                ids["LinkedIn"]: "https://www.linkedin.com/in/ada",
+                ids["Company"]: "Acme",
+                ids["Domain"]: "acme.com",
+            }
+        ),
+    )
+    run = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(run["id"]))
+    listed = await service.list_rows(table["id"], limit=10, offset=0)
+    cell = listed["items"][0]["values"][str(parent["id"])]
+    assert cell["status"] == "succeeded"
+    assert cell["email"] == "ada@acme.com"
+    assert cell["validation_result"] == "catch_all"
+    assert cell["rejected_emails"] == []
+    assert listed["items"][0]["values"][str(child["id"])] == "ada@acme.com"
+

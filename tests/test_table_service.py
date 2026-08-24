@@ -386,6 +386,39 @@ class FakeTableRepository:
             stored.append(deepcopy(record))
         return stored
 
+    async def list_email_enrichment_runs_for_column(self, column_id: str) -> list[dict]:
+        runs = [
+            deepcopy(run)
+            for run in self.email_runs.values()
+            if run["column_id"] == column_id
+        ]
+        return sorted(
+            runs,
+            key=lambda run: (run.get("created_at") or "", run["id"]),
+            reverse=True,
+        )
+
+    async def list_email_enrichment_run_items_for_runs(
+        self, run_ids: list[str]
+    ) -> list[dict]:
+        wanted = set(run_ids)
+        return [
+            deepcopy(item)
+            for item in self.email_run_items.values()
+            if item["run_id"] in wanted
+        ]
+
+    async def list_email_enrichment_catchall_attempts(
+        self, run_ids: list[str]
+    ) -> list[dict]:
+        wanted = set(run_ids)
+        return [
+            deepcopy(attempt)
+            for attempt in self.email_attempts
+            if attempt.get("run_id") in wanted
+            and attempt.get("validation_result") == "catch_all"
+        ]
+
     def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
         for existing in self.columns.values():
             if existing["id"] == ignore_id:

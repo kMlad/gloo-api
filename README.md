@@ -240,9 +240,13 @@ Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
 Create an email enrichment column after mapping first name, last name, LinkedIn
 URL, company name, and company domain/website columns. Providers default to
 Icypeas → Kitt → LeadMagic → Prospeo → FullEnrich; omit or reorder them as
-needed. The only validator is MillionVerifier, and only `ok` counts as valid.
-`catch_all` and other results are cached on the row so the same address is not
-re-verified later in the waterfall.
+needed. The only validator is MillionVerifier. By default only `ok` counts as
+valid. Set `accept_catchall: true` to also accept `catch_all` after the
+waterfall finishes looking for an `ok` (the first catch-all is used as a
+fallback). `PATCH` can turn the flag on and will reclassify existing
+`not_found` rows from stored MillionVerifier results; it cannot turn the flag
+off. Catch-all and other results are cached on the row so the same address is
+not re-verified later in the waterfall.
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
@@ -254,6 +258,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
     "email_enrichment": {
       "providers": ["icypeas", "kitt", "leadmagic", "prospeo", "fullenrich"],
       "validator": "millionverifier",
+      "accept_catchall": false,
       "first_name_column_id": "...",
       "last_name_column_id": "...",
       "linkedin_column_id": "...",
@@ -267,7 +272,8 @@ Runs use the same endpoint as sheriff:
 `POST /api/v1/tables/{table_id}/columns/{column_id}/runs`. A row is skipped when
 any mapped input is blank. `overwrite: false` skips rows whose parent cell
 `status` is `succeeded`. A succeeded cell includes the waterfall `steps` the UI
-can render, for example `Icypeas: found test@gmail.com (invalid)`:
+can render, for example `Icypeas: found test@gmail.com (invalid)`. Catch-all
+fallbacks store `validation_result: "catch_all"` instead of `"ok"`:
 
 ```json
 {
