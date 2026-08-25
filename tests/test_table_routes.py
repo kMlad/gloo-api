@@ -142,3 +142,43 @@ def test_table_filter_schema_validates_operators() -> None:
         TableFilter(column_id=column_id, operator="contains", value="")
     with pytest.raises(ValidationError):
         TableFilter(column_id=column_id, operator="eq")
+
+
+@pytest.mark.asyncio
+async def test_export_table_returns_csv_attachment() -> None:
+    class ExportStub:
+        def __init__(self) -> None:
+            self.called: tuple[str, str | None, str] | None = None
+
+        async def export_csv(
+            self,
+            table_id: str,
+            *,
+            sort_column_id: str | None = None,
+            sort_direction: str = "asc",
+        ) -> tuple[str, bytes]:
+            self.called = (table_id, sort_column_id, sort_direction)
+            return ("Leads.csv", "\ufeffCompany\nAcme\n".encode())
+
+    table_id = uuid4()
+    sort_id = uuid4()
+    service = ExportStub()
+    supabase = SupabaseStub(AuthStub(current_user=_user()))
+    app = _app(supabase, service)  # type: ignore[arg-type]
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            f"/api/v1/tables/{table_id}/export",
+            params={"sort_column_id": str(sort_id), "sort_direction": "desc"},
+            headers={"Authorization": "Bearer user-jwt"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "Leads.csv" in response.headers["content-disposition"]
+    assert response.content.startswith("\ufeff".encode())
+    assert b"Acme" in response.content
+    assert service.called == (str(table_id), str(sort_id), "desc")

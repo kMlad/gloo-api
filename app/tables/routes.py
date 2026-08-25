@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import (
@@ -18,6 +18,7 @@ from app.auth import AuthenticatedUser, require_authenticated_user
 from app.dependencies import get_table_service
 from app.tables.email_enrichment import EmailEnrichmentUnavailableError
 from app.tables.sheriff import SheriffUnavailableError
+from app.tables.csv_export import content_disposition_attachment
 from app.tables.csv_import import CsvImportError
 from app.tables.schemas import (
     SheriffExpandRequest,
@@ -293,6 +294,31 @@ async def get_column_run(
         )
     except TableNotFoundError as error:
         raise _map_table_error(error) from error
+
+
+@router.get("/{table_id}/export")
+async def export_table(
+    table_id: UUID,
+    service: ServiceDependency,
+    sort_column_id: UUID | None = Query(default=None),
+    sort_direction: Literal["asc", "desc"] = Query(default="asc"),
+) -> Response:
+    try:
+        filename, content = await service.export_csv(
+            str(table_id),
+            sort_column_id=None if sort_column_id is None else str(sort_column_id),
+            sort_direction=sort_direction,
+        )
+    except (TableNotFoundError, TableValidationError) as error:
+        raise _map_table_error(error) from error
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": content_disposition_attachment(filename),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/{table_id}/rows", response_model=RowListResponse)

@@ -28,6 +28,7 @@ from app.tables.sheriff.prompts import (
     stringify_cell,
     unique_child_name,
 )
+from app.tables.csv_export import csv_filename, format_csv_cell, render_csv
 from app.tables.csv_import import parse_csv, table_name_from_filename
 from app.tables.repository import TableRepository, is_unique_violation
 from app.tables.schemas import (
@@ -329,6 +330,38 @@ class TableService:
             "limit": limit,
             "offset": offset,
         }
+
+    async def export_csv(
+        self,
+        table_id: str,
+        *,
+        sort_column_id: str | None = None,
+        sort_direction: Literal["asc", "desc"] = "asc",
+    ) -> tuple[str, bytes]:
+        table, columns = await self._require_table_and_columns(table_id)
+        filters = _parse_filters(table.get("filters") or [])
+        _validate_filters(filters, columns)
+        rows = await self._repository.list_all_rows(table_id)
+        if filters:
+            rows = [
+                row
+                for row in rows
+                if _row_matches_filters(row.get("values") or {}, filters, columns)
+            ]
+        if sort_column_id is not None:
+            rows = _sort_rows(rows, columns, sort_column_id, sort_direction)
+        visible = [column for column in columns if not column.get("hidden")]
+        headers = [str(column["name"]) for column in visible]
+        csv_rows = [
+            [
+                format_csv_cell(
+                    column["type"], (row.get("values") or {}).get(str(column["id"]))
+                )
+                for column in visible
+            ]
+            for row in rows
+        ]
+        return csv_filename(str(table["name"])), render_csv(headers, csv_rows)
 
     async def add_row(self, table_id: str, payload: RowCreate) -> dict[str, Any]:
         columns = await self._require_columns(table_id)
@@ -1443,6 +1476,30 @@ def _row_matches_filters(
         if needle.casefold() not in cell.casefold():
             return False
     return True
+
+
+def _sort_rows(
+    rows: list[dict[str, Any]],
+    columns: list[dict[str, Any]],
+    sort_column_id: str,
+    sort_direction: Literal["asc", "desc"],
+) -> list[dict[str, Any]]:
+    column = next(
+        (item for item in columns if str(item["id"]) == sort_column_id),
+        None,
+    )
+    if column is None:
+        raise TableValidationError("sort_column_id was not found on this table")
+    column_id = str(column["id"])
+    reverse = sort_direction == "desc"
+
+    def sort_key(row: dict[str, Any]) -> tuple[str, int, str]:
+        cell = format_csv_cell(
+            column["type"], (row.get("values") or {}).get(column_id)
+        )
+        return (cell.casefold(), int(row.get("position") or 0), str(row["id"]))
+
+    return sorted(rows, key=sort_key, reverse=reverse)
 
 
 def _column_by_id(columns: list[dict[str, Any]], column_id: str) -> dict[str, Any]:

@@ -1,3 +1,5 @@
+import csv
+import io
 from copy import deepcopy
 from uuid import uuid4
 
@@ -765,3 +767,89 @@ async def test_list_rows_pages_filtered_matches() -> None:
         "Acme 4",
         "Acme 6",
     ]
+
+
+def _csv_rows(content: bytes) -> list[list[str]]:
+    return list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+
+
+@pytest.mark.asyncio
+async def test_export_csv_uses_current_view() -> None:
+    service, repository = _service()
+    table = await service.create_table(
+        TableCreate(
+            name="Outbound Aug",
+            columns=[
+                ColumnCreate(name="Company"),
+                ColumnCreate(name="Name"),
+                ColumnCreate(name="Active", type="boolean"),
+            ],
+        ),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    name_id = table["columns"][1]["id"]
+    active_id = table["columns"][2]["id"]
+    await service.add_row(
+        table["id"],
+        RowCreate(values={company_id: "Globex", name_id: "Lee", active_id: False}),
+    )
+    await service.add_row(
+        table["id"],
+        RowCreate(values={company_id: "Acme, Inc", name_id: "Pat", active_id: True}),
+    )
+    await service.add_row(
+        table["id"],
+        RowCreate(values={company_id: "Initech", name_id: "Sam"}),
+    )
+    await service.update_column(
+        table["id"], str(name_id), ColumnUpdate(hidden=True)
+    )
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[TableFilter(column_id=company_id, operator="contains", value="ac")]
+        ),
+    )
+
+    filename, content = await service.export_csv(table["id"])
+    assert filename == "Outbound Aug.csv"
+    assert _csv_rows(content) == [
+        ["Company", "Active"],
+        ["Acme, Inc", "true"],
+    ]
+
+    await service.replace_filters(table["id"], TableFiltersUpdate(filters=[]))
+    await service.reorder_columns(
+        table["id"], [active_id, company_id, name_id]
+    )
+    filename, content = await service.export_csv(
+        table["id"], sort_column_id=str(company_id), sort_direction="asc"
+    )
+    assert _csv_rows(content) == [
+        ["Active", "Company"],
+        ["true", "Acme, Inc"],
+        ["false", "Globex"],
+        ["", "Initech"],
+    ]
+
+    _, desc = await service.export_csv(
+        table["id"], sort_column_id=str(company_id), sort_direction="desc"
+    )
+    assert [row[1] for row in _csv_rows(desc)[1:]] == ["Initech", "Globex", "Acme, Inc"]
+
+    parent_id = str(table["columns"][0]["id"])
+    row_id = next(iter(repository.rows))
+    repository.rows[row_id]["values"][parent_id] = {
+        "status": "succeeded",
+        "email": "pat@acme.com",
+    }
+    repository.columns[parent_id]["type"] = "email_enrichment"
+    _, computed = await service.export_csv(table["id"])
+    assert "pat@acme.com" in computed.decode("utf-8-sig")
+
+    with pytest.raises(TableValidationError, match="sort_column_id"):
+        await service.export_csv(table["id"], sort_column_id=str(uuid4()))
+
+    with pytest.raises(TableNotFoundError):
+        await service.export_csv(str(uuid4()))

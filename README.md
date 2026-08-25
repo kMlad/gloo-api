@@ -171,6 +171,16 @@ Saved filters are applied on row reads. Replace them with
 `PUT /api/v1/tables/{table_id}/filters`. Rename or hide a column with
 `PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
 `PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
+Download the current view as CSV (saved filters, current column order, hidden
+columns omitted). The file is UTF-8 with a BOM so Excel opens it. Optional
+`sort_column_id` and `sort_direction` (`asc` or `desc`) match a client-side
+sort; the default is row order:
+
+```text
+GET /api/v1/tables/{table_id}/export
+GET /api/v1/tables/{table_id}/export?sort_column_id=...&sort_direction=desc
+```
+
 Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
 patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff and
 email enrichment columns are not allowed on table create or CSV import — add

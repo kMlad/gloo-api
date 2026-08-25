@@ -235,6 +235,7 @@ def create_app(
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=["Content-Disposition"],
         )
     application.include_router(smartlead_router)
     application.include_router(leads_router)
