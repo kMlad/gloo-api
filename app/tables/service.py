@@ -1415,6 +1415,7 @@ def _filter_to_record(item: TableFilter) -> dict[str, Any]:
         "column_id": str(item.column_id),
         "operator": item.operator,
         "value": item.value,
+        "logic": item.logic,
     }
 
 
@@ -1450,32 +1451,39 @@ def _row_matches_filters(
     filters: list[TableFilter],
     columns: list[dict[str, Any]],
 ) -> bool:
+    if not filters:
+        return True
     columns_by_id = {str(column["id"]): column for column in columns}
-    for item in filters:
-        column_id = str(item.column_id)
-        cell = values.get(column_id)
-        empty = cell is None or cell == ""
-        if item.operator == "is_empty":
-            if not empty:
-                return False
-            continue
-        if item.operator == "is_not_empty":
-            if empty:
-                return False
-            continue
-        if empty:
-            return False
-        if item.operator == "eq":
-            if cell != item.value:
-                return False
-            continue
-        column = columns_by_id[column_id]
-        if column["type"] != "text" or not isinstance(cell, str):
-            return False
-        needle = str(item.value)
-        if needle.casefold() not in cell.casefold():
-            return False
-    return True
+    matched = _clause_matches(values, filters[0], columns_by_id)
+    for item in filters[1:]:
+        clause = _clause_matches(values, item, columns_by_id)
+        if item.logic == "or":
+            matched = matched or clause
+        else:
+            matched = matched and clause
+    return matched
+
+
+def _clause_matches(
+    values: dict[str, Any],
+    item: TableFilter,
+    columns_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    column_id = str(item.column_id)
+    cell = values.get(column_id)
+    empty = cell is None or cell == ""
+    if item.operator == "is_empty":
+        return empty
+    if item.operator == "is_not_empty":
+        return not empty
+    if empty:
+        return False
+    if item.operator == "eq":
+        return cell == item.value
+    column = columns_by_id[column_id]
+    if column["type"] != "text" or not isinstance(cell, str):
+        return False
+    return str(item.value).casefold() in cell.casefold()
 
 
 def _sort_rows(

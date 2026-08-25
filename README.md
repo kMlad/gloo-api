@@ -168,7 +168,11 @@ Hosted projects have a separate **Max rows** setting under Project Settings → 
 — set that to 10,000 as well, or production stays capped at the default 1,000.
 
 Saved filters are applied on row reads. Replace them with
-`PUT /api/v1/tables/{table_id}/filters`. Rename or hide a column with
+`PUT /api/v1/tables/{table_id}/filters`. Each clause after the first may set
+`logic` to `and` (default) or `or` to chain it with the previous result.
+Clauses are evaluated left to right, so `contains "Yes" OR contains "Unclear"
+AND active is true` keeps rows that match Yes or Unclear, then restricts to
+active rows. The first clause's `logic` is ignored. Rename or hide a column with
 `PATCH /api/v1/tables/{table_id}/columns/{column_id}`. Persist column order with
 `PUT /api/v1/tables/{table_id}/columns/order` and a complete `column_ids` list.
 Download the current view as CSV (saved filters, current column order, hidden

@@ -11,6 +11,7 @@ ColumnType = Literal["text", "boolean", "sheriff", "email_enrichment"]
 EmailProvider = Literal["icypeas", "kitt", "leadmagic", "prospeo", "fullenrich"]
 EmailValidatorName = Literal["millionverifier"]
 FilterOperator = Literal["eq", "contains", "is_empty", "is_not_empty"]
+FilterLogic = Literal["and", "or"]
 CellValue = str | bool | None
 SheriffRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
 SheriffRunItemStatus = Literal[
@@ -23,6 +24,7 @@ class TableFilter(BaseModel):
     column_id: UUID
     operator: FilterOperator
     value: str | bool | None = None
+    logic: FilterLogic = "and"
 
     @model_validator(mode="after")
     def validate_operator_value(self) -> "TableFilter":

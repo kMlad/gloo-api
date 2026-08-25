@@ -134,6 +134,13 @@ def test_table_filter_schema_validates_operators() -> None:
         column_id=column_id, operator="contains", value="acme"
     ).operator == "contains"
     assert TableFilter(column_id=column_id, operator="eq", value=True).value is True
+    assert TableFilter(column_id=column_id, operator="contains", value="Yes").logic == "and"
+    assert (
+        TableFilter(
+            column_id=column_id, operator="contains", value="Unclear", logic="or"
+        ).logic
+        == "or"
+    )
     with pytest.raises(ValidationError):
         TableFilter(column_id=column_id, operator="is_empty", value="x")
     with pytest.raises(ValidationError):
@@ -142,6 +149,15 @@ def test_table_filter_schema_validates_operators() -> None:
         TableFilter(column_id=column_id, operator="contains", value="")
     with pytest.raises(ValidationError):
         TableFilter(column_id=column_id, operator="eq")
+    with pytest.raises(ValidationError):
+        TableFilter.model_validate(
+            {
+                "column_id": column_id,
+                "operator": "contains",
+                "value": "Yes",
+                "logic": "xor",
+            }
+        )
 
 
 @pytest.mark.asyncio

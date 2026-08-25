@@ -580,6 +580,100 @@ async def test_filters_eq_contains_is_empty_and_is_not_empty() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filters_chain_and_or_logic() -> None:
+    service, _repository = _service()
+    table = await service.create_table(
+        TableCreate(
+            name="Leads",
+            columns=[
+                ColumnCreate(name="Europe presence"),
+                ColumnCreate(name="Active", type="boolean"),
+            ],
+        ),
+        created_by=str(uuid4()),
+    )
+    europe_id = table["columns"][0]["id"]
+    active_id = table["columns"][1]["id"]
+    await service.add_row(
+        table["id"], RowCreate(values={europe_id: "Yes", active_id: False})
+    )
+    await service.add_row(
+        table["id"], RowCreate(values={europe_id: "Unclear", active_id: True})
+    )
+    await service.add_row(
+        table["id"], RowCreate(values={europe_id: "No", active_id: True})
+    )
+    await service.add_row(table["id"], RowCreate(values={europe_id: "Maybe"}))
+
+    updated = await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[
+                TableFilter(column_id=europe_id, operator="contains", value="Yes"),
+                TableFilter(
+                    column_id=europe_id, operator="contains", value="Unclear", logic="or"
+                ),
+            ]
+        ),
+    )
+    assert [item.logic for item in updated["filters"]] == ["and", "or"]
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert [item["values"][str(europe_id)] for item in matched["items"]] == [
+        "Yes",
+        "Unclear",
+    ]
+
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[
+                TableFilter(column_id=europe_id, operator="contains", value="Yes"),
+                TableFilter(
+                    column_id=europe_id, operator="contains", value="Unclear", logic="or"
+                ),
+                TableFilter(column_id=active_id, operator="eq", value=True, logic="and"),
+            ]
+        ),
+    )
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert [item["values"][str(europe_id)] for item in matched["items"]] == ["Unclear"]
+
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[
+                TableFilter(column_id=europe_id, operator="eq", value="Yes"),
+                TableFilter(column_id=europe_id, operator="eq", value="No"),
+            ]
+        ),
+    )
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert matched["total"] == 0
+
+    await service.replace_filters(
+        table["id"],
+        TableFiltersUpdate(
+            filters=[
+                TableFilter(column_id=europe_id, operator="contains", value="e"),
+                TableFilter(
+                    column_id=europe_id, operator="contains", value="No", logic="or"
+                ),
+                TableFilter(
+                    column_id=europe_id, operator="contains", value="Maybe", logic="or"
+                ),
+            ]
+        ),
+    )
+    matched = await service.list_rows(table["id"], limit=100, offset=0)
+    assert [item["values"][str(europe_id)] for item in matched["items"]] == [
+        "Yes",
+        "Unclear",
+        "No",
+        "Maybe",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_cell_merge_and_clear() -> None:
     service, _repository = _service()
     table = await service.create_table(
