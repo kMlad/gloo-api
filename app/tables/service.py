@@ -12,7 +12,12 @@ from app.tables.email_enrichment import (
     EmailValidator,
     run_waterfall,
 )
-from app.tables.email_enrichment.inputs import cell_text, normalize_domain, person_linkedin
+from app.tables.email_enrichment.inputs import (
+    cell_text,
+    normalize_domain,
+    normalize_email,
+    person_linkedin,
+)
 from app.tables.email_enrichment.protocol import AttemptRecord, WaterfallStep
 from app.tables.sheriff import (
     PerplexityUsage,
@@ -34,6 +39,7 @@ from app.tables.repository import TableRepository, is_unique_violation
 from app.tables.schemas import (
     COMPUTED_COLUMN_TYPES,
     EmailEnrichmentConfig,
+    EmailValidationConfig,
     SheriffConfig,
     SheriffExpandRequest,
     SheriffOutputField,
@@ -53,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 _POSITION_OFFSET = 10_000
 _MAX_SHERIFF_RUN_ROWS = 100
+_VALIDATION_HARD_ERRORS = {"failed", "rate_limited", "timed_out"}
 
 
 class TableNotFoundError(Exception):
@@ -187,6 +194,10 @@ class TableService:
             return await self._add_email_enrichment_column(
                 table_id, payload, columns, next_position, now
             )
+        if payload.type == "email_validation":
+            return await self._add_email_validation_column(
+                table_id, payload, columns, next_position, now
+            )
         try:
             inserted = await self._repository.insert_columns(
                 [
@@ -237,6 +248,18 @@ class TableService:
             )
             _validate_email_input_columns(email_config, columns, column_id)
             config = _email_enrichment_config_record(email_config)
+        if payload.email_validation is not None:
+            if column["type"] != "email_validation":
+                raise TableValidationError(
+                    "email_validation config is only valid on email_validation columns"
+                )
+            validation_config = _resolve_email_validation_patch(
+                payload.email_validation, column.get("config")
+            )
+            _validate_email_validation_column(
+                validation_config, columns, column_id
+            )
+            config = _email_validation_config_record(validation_config)
         try:
             updated = await self._repository.update_column(
                 column_id,
@@ -255,6 +278,13 @@ class TableService:
             and config.get("accept_catchall")
         ):
             await self._reclassify_catchall_rows(table_id, column_id, columns)
+        if payload.email_validation is not None and config is not None:
+            await self._reclassify_validation_rows(
+                table_id,
+                column_id,
+                columns,
+                bool(config.get("accept_catchall")),
+            )
         if added_children:
             return await self.get_table(table_id)
         return _column_response(updated)
@@ -729,7 +759,153 @@ class TableService:
         if sheriff is not None:
             items = await self._repository.list_sheriff_run_items(run_id)
             return {**sheriff, "not_found_count": 0, "items": items}
+        validation = await self._repository.get_email_validation_run(
+            table_id, column_id, run_id
+        )
+        if validation is not None:
+            items = await self._repository.list_email_validation_run_items(run_id)
+            return {**validation, "items": items}
         return await self.get_email_enrichment_run(table_id, column_id, run_id)
+
+    async def start_email_validation_run(
+        self,
+        table_id: str,
+        column_id: str,
+        payload: SheriffRunCreate,
+        *,
+        created_by: str,
+    ) -> dict[str, Any]:
+        columns = await self._require_columns(table_id)
+        column = _column_by_id(columns, column_id)
+        if column["type"] != "email_validation":
+            raise TableValidationError(
+                "Email validation runs are only supported on email_validation columns"
+            )
+        self._require_email_validator()
+        config = _parse_email_validation_config(column.get("config"))
+        _validate_email_validation_column(config, columns, column_id)
+        rows = await self._repository.list_all_rows(table_id)
+        selected = _select_run_rows(rows, payload.row_ids)
+        now = to_iso(utc_now())
+        run = await self._repository.insert_email_validation_run(
+            {
+                "table_id": table_id,
+                "column_id": column_id,
+                "created_by": created_by,
+                "status": "queued",
+                "row_ids": (
+                    [str(row_id) for row_id in payload.row_ids]
+                    if payload.row_ids is not None
+                    else None
+                ),
+                "overwrite": payload.overwrite,
+                "total_count": len(selected),
+                "succeeded_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "not_found_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        run_id = str(run["id"])
+        items: list[dict[str, Any]] = []
+        cell_updates: list[tuple[str, dict[str, Any]]] = []
+        skipped = 0
+        for row in selected:
+            row_id = str(row["id"])
+            values = dict(row.get("values") or {})
+            cell = values.get(column_id)
+            skip = (
+                not payload.overwrite
+                and isinstance(cell, dict)
+                and cell.get("status") == "succeeded"
+            )
+            item_status = "skipped" if skip else "queued"
+            if skip:
+                skipped += 1
+            else:
+                values[column_id] = _email_validation_cell(status="queued")
+                cell_updates.append((row_id, values))
+            items.append(
+                {
+                    "run_id": run_id,
+                    "row_id": row_id,
+                    "status": item_status,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        if items:
+            await self._repository.insert_email_validation_run_items(items)
+        if cell_updates:
+            await self._repository.replace_row_values(cell_updates)
+        await self._repository.update_email_validation_run(
+            run_id, {"skipped_count": skipped, "total_count": len(selected)}
+        )
+        await self._repository.update_table(table_id)
+        return await self.get_email_validation_run(table_id, column_id, run_id)
+
+    async def execute_email_validation_run(self, run_id: str) -> None:
+        run = await self._repository.get_email_validation_run_by_id(run_id)
+        if run is None:
+            return
+        table_id = str(run["table_id"])
+        column_id = str(run["column_id"])
+        await self._repository.update_email_validation_run(run_id, {"status": "running"})
+        try:
+            columns = await self._require_columns(table_id)
+            column = _column_by_id(columns, column_id)
+            validator = self._require_email_validator()
+            config = _parse_email_validation_config(column.get("config"))
+            children = {
+                str(item.get("source_field") or ""): item
+                for item in columns
+                if str(item.get("source_column_id") or "") == column_id
+            }
+            rows = {
+                str(row["id"]): row
+                for row in await self._repository.list_all_rows(table_id)
+            }
+            items = await self._repository.list_email_validation_run_items(run_id)
+            semaphore = asyncio.Semaphore(self._email_concurrency)
+
+            async def process(item: dict[str, Any]) -> None:
+                if item["status"] == "skipped":
+                    return
+                async with semaphore:
+                    await self._execute_email_validation_item(
+                        table_id=table_id,
+                        column=column,
+                        children=children,
+                        config=config,
+                        validator=validator,
+                        item=item,
+                        row=rows.get(str(item["row_id"])),
+                    )
+
+            await asyncio.gather(*(process(item) for item in items))
+        except Exception as error:
+            await self._fail_open_email_validation_run_items(
+                run_id,
+                str(error),
+                table_id=table_id,
+                column_id=column_id,
+            )
+        await self._finalize_email_validation_run(run_id)
+        await self._repository.update_table(table_id)
+
+    async def get_email_validation_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict[str, Any]:
+        await self._require_table(table_id)
+        run = await self._repository.get_email_validation_run(
+            table_id, column_id, run_id
+        )
+        if run is None:
+            raise TableNotFoundError("Run not found")
+        items = await self._repository.list_email_validation_run_items(run_id)
+        return {**run, "items": items}
 
     def _require_agent(self) -> SheriffAgent:
         if self._agent is None:
@@ -739,7 +915,7 @@ class TableService:
     def _require_email_validator(self) -> EmailValidator:
         if self._email_validator is None:
             raise EmailEnrichmentUnavailableError(
-                "Email enrichment is not configured"
+                "MillionVerifier is not configured"
             )
         return self._email_validator
 
@@ -789,6 +965,225 @@ class TableService:
             _reraise_unique(error, "A column with this name already exists")
         await self._repository.update_table(table_id)
         return await self.get_table(table_id)
+
+    async def _add_email_validation_column(
+        self,
+        table_id: str,
+        payload: ColumnCreate,
+        columns: list[dict[str, Any]],
+        next_position: int,
+        now: str,
+    ) -> dict[str, Any]:
+        assert payload.email_validation is not None
+        _validate_email_validation_column(payload.email_validation, columns)
+        parent_id = str(uuid4())
+        taken = {str(column["name"]) for column in columns}
+        taken.add(payload.name)
+        child_name = unique_child_name(payload.name, "valid", taken)
+        records = [
+            {
+                "id": parent_id,
+                "table_id": table_id,
+                "name": payload.name,
+                "type": "email_validation",
+                "position": next_position,
+                "hidden": False,
+                "config": _email_validation_config_record(payload.email_validation),
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "id": str(uuid4()),
+                "table_id": table_id,
+                "name": child_name,
+                "type": "boolean",
+                "position": next_position + 1,
+                "hidden": False,
+                "source_column_id": parent_id,
+                "source_field": "valid",
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        try:
+            await self._repository.insert_columns(records)
+        except APIError as error:
+            _reraise_unique(error, "A column with this name already exists")
+        await self._repository.update_table(table_id)
+        return await self.get_table(table_id)
+
+    async def _execute_email_validation_item(
+        self,
+        *,
+        table_id: str,
+        column: dict[str, Any],
+        children: dict[str, dict[str, Any]],
+        config: EmailValidationConfig,
+        validator: EmailValidator,
+        item: dict[str, Any],
+        row: dict[str, Any] | None,
+    ) -> None:
+        item_id = str(item["id"])
+        column_id = str(column["id"])
+        if row is None:
+            await self._repository.update_email_validation_run_item(
+                item_id,
+                {"status": "failed", "error_message": "Row not found"},
+            )
+            return
+        row_id = str(row["id"])
+        fresh = await self._repository.get_row(table_id, row_id)
+        if fresh is None:
+            await self._repository.update_email_validation_run_item(
+                item_id,
+                {"status": "failed", "error_message": "Row not found"},
+            )
+            return
+        values = dict(fresh.get("values") or {})
+        values[column_id] = _email_validation_cell(status="running")
+        await self._repository.replace_row_values([(row_id, values)])
+        await self._repository.update_email_validation_run_item(
+            item_id, {"status": "running"}
+        )
+        email = normalize_email(values.get(str(config.email_column_id)))
+        if email is None:
+            values[column_id] = _email_validation_cell(
+                status="skipped",
+                error="Mapped email column is required",
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            await self._repository.update_email_validation_run_item(
+                item_id,
+                {
+                    "status": "skipped",
+                    "error_message": "Mapped email column is required",
+                },
+            )
+            return
+        try:
+            verification = await validator.verify(email)
+        except Exception as error:
+            values[column_id] = _email_validation_cell(
+                status="failed", email=email, error=str(error)
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            await self._repository.update_email_validation_run_item(
+                item_id,
+                {"status": "failed", "error_message": str(error)},
+            )
+            return
+        if verification.status in _VALIDATION_HARD_ERRORS:
+            message = verification.error_message or "MillionVerifier request failed"
+            values[column_id] = _email_validation_cell(
+                status="failed",
+                email=email,
+                result=verification.result,
+                error=message,
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            await self._repository.update_email_validation_run_item(
+                item_id,
+                {"status": "failed", "error_message": message},
+            )
+            return
+        valid = _email_is_valid(verification.result, config.accept_catchall)
+        _write_email_validation_child(values, children, valid)
+        values[column_id] = _email_validation_cell(
+            status="succeeded",
+            email=email,
+            result=verification.result,
+            valid=valid,
+        )
+        await self._repository.replace_row_values([(row_id, values)])
+        await self._repository.update_email_validation_run_item(
+            item_id, {"status": "succeeded", "error_message": None}
+        )
+
+    async def _reclassify_validation_rows(
+        self,
+        table_id: str,
+        column_id: str,
+        columns: list[dict[str, Any]],
+        accept_catchall: bool,
+    ) -> None:
+        children = {
+            str(item.get("source_field") or ""): item
+            for item in columns
+            if str(item.get("source_column_id") or "") == column_id
+        }
+        rows = await self._repository.list_all_rows(table_id)
+        updates: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            values = dict(row.get("values") or {})
+            cell = values.get(column_id)
+            if not isinstance(cell, dict) or cell.get("status") != "succeeded":
+                continue
+            result = cell.get("result") if isinstance(cell.get("result"), str) else None
+            valid = _email_is_valid(result, accept_catchall)
+            child = children.get("valid")
+            child_id = str(child["id"]) if child is not None else None
+            if cell.get("valid") is valid and (
+                child_id is None or values.get(child_id) is valid
+            ):
+                continue
+            values[column_id] = {**cell, "valid": valid}
+            _write_email_validation_child(values, children, valid)
+            updates.append((str(row["id"]), values))
+        if updates:
+            await self._repository.replace_row_values(updates)
+
+    async def _fail_open_email_validation_run_items(
+        self,
+        run_id: str,
+        message: str,
+        *,
+        table_id: str,
+        column_id: str,
+    ) -> None:
+        items = await self._repository.list_email_validation_run_items(run_id)
+        for item in items:
+            if item["status"] not in {"queued", "running"}:
+                continue
+            await self._repository.update_email_validation_run_item(
+                str(item["id"]),
+                {"status": "failed", "error_message": message},
+            )
+            row = await self._repository.get_row(table_id, str(item["row_id"]))
+            if row is None:
+                continue
+            values = dict(row.get("values") or {})
+            existing = values.get(column_id)
+            email = existing.get("email") if isinstance(existing, dict) else None
+            values[column_id] = _email_validation_cell(
+                status="failed",
+                email=email if isinstance(email, str) else None,
+                error=message,
+            )
+            await self._repository.replace_row_values([(str(item["row_id"]), values)])
+
+    async def _finalize_email_validation_run(self, run_id: str) -> None:
+        items = await self._repository.list_email_validation_run_items(run_id)
+        succeeded = sum(1 for item in items if item["status"] == "succeeded")
+        failed = sum(1 for item in items if item["status"] == "failed")
+        skipped = sum(1 for item in items if item["status"] == "skipped")
+        if failed and succeeded:
+            status = "partial"
+        elif failed:
+            status = "failed"
+        else:
+            status = "succeeded"
+        await self._repository.update_email_validation_run(
+            run_id,
+            {
+                "status": status,
+                "succeeded_count": succeeded,
+                "failed_count": failed,
+                "skipped_count": skipped,
+                "not_found_count": 0,
+                "total_count": len(items),
+                "completed_at": to_iso(utc_now()),
+            },
+        )
 
     async def _execute_email_enrichment_item(
         self,
@@ -1882,3 +2277,85 @@ def _email_enrichment_cell(
         "steps": [step.as_dict() for step in steps or []],
         "error": error,
     }
+
+
+def _email_validation_config_record(config: EmailValidationConfig) -> dict[str, Any]:
+    return {
+        "email_column_id": str(config.email_column_id),
+        "validator": config.validator,
+        "accept_catchall": config.accept_catchall,
+    }
+
+
+def _resolve_email_validation_patch(
+    payload: EmailValidationConfig, stored_raw: Any
+) -> EmailValidationConfig:
+    stored_accept = False
+    if isinstance(stored_raw, dict):
+        stored_accept = bool(stored_raw.get("accept_catchall", False))
+    if "accept_catchall" not in payload.model_fields_set:
+        return payload.model_copy(update={"accept_catchall": stored_accept})
+    return payload
+
+
+def _parse_email_validation_config(raw: Any) -> EmailValidationConfig:
+    if not isinstance(raw, dict):
+        raise TableValidationError("Email validation column is missing config")
+    return EmailValidationConfig.model_validate(raw)
+
+
+def _validate_email_validation_column(
+    config: EmailValidationConfig,
+    columns: list[dict[str, Any]],
+    parent_id: str | None = None,
+) -> None:
+    by_id = {str(column["id"]): column for column in columns}
+    column = by_id.get(str(config.email_column_id))
+    if column is None:
+        raise TableValidationError(f"Unknown input column {config.email_column_id}")
+    if parent_id is not None and str(column["id"]) == parent_id:
+        raise TableValidationError("email validation cannot map itself as an input")
+    if column["type"] != "text":
+        raise TableValidationError(
+            f"email_column_id must reference a text column ({column['name']})"
+        )
+    source_parent = str(column.get("source_column_id") or "")
+    if parent_id is not None and source_parent == parent_id:
+        raise TableValidationError(
+            "email validation cannot map its own child column as an input"
+        )
+
+
+def _email_is_valid(result: str | None, accept_catchall: bool) -> bool:
+    if result == "ok":
+        return True
+    return accept_catchall and result == "catch_all"
+
+
+def _email_validation_cell(
+    *,
+    status: str,
+    email: str | None = None,
+    result: str | None = None,
+    valid: bool | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "email": email,
+        "validator": "millionverifier",
+        "result": result,
+        "valid": valid,
+        "error": error,
+    }
+
+
+def _write_email_validation_child(
+    values: dict[str, Any],
+    children: dict[str, dict[str, Any]],
+    valid: bool,
+) -> None:
+    child = children.get("valid")
+    if child is None:
+        return
+    values[str(child["id"])] = valid

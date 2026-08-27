@@ -124,11 +124,13 @@ via Supabase's invite confirmation flow.
 
 Workbook-style tables are independent of CRM leads. Any signed-in user can
 create, import, and edit them. Column types are `text`, `boolean`,
-`sheriff`, or `email_enrichment`. Empty `text`/`boolean` columns start blank;
-missing cells are returned as `null`. Sheriff columns are a reusable research
-prompt that writes typed fields back into auto-created child columns. Email
-enrichment columns run a provider waterfall, validate candidates with
-MillionVerifier, and write a work email into an auto-created child column.
+`sheriff`, `email_enrichment`, or `email_validation`. Empty `text`/`boolean`
+columns start blank; missing cells are returned as `null`. Sheriff columns are
+a reusable research prompt that writes typed fields back into auto-created
+child columns. Email enrichment columns run a provider waterfall, validate
+candidates with MillionVerifier, and write a work email into an auto-created
+child column. Email validation columns check an existing text column with
+MillionVerifier and write a boolean into an auto-created child column.
 
 Create an empty table:
 
@@ -186,9 +188,9 @@ GET /api/v1/tables/{table_id}/export?sort_column_id=...&sort_direction=desc
 ```
 
 Append an empty column with `POST /api/v1/tables/{table_id}/columns`. Create,
-patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff and
-email enrichment columns are not allowed on table create or CSV import — add
-them after input columns exist.
+patch, and delete rows under `/api/v1/tables/{table_id}/rows`. Sheriff, email
+enrichment, and email validation columns are not allowed on table create or CSV
+import — add them after input columns exist.
 
 Optional prompt helper (nothing is persisted):
 
@@ -324,5 +326,49 @@ Email enrichment reuses `LEADMAGIC_API_KEY`, `PROSPEO_API_KEY`, and
 providers without a key are skipped. Optional tuning:
 `EMAIL_ENRICHMENT_CONCURRENCY` (default 3),
 `EMAIL_ENRICHMENT_FULLENRICH_POLL_SECONDS` (default 90).
+
+Create an email validation column after mapping a text column that already
+holds addresses. The response is the full table, including an auto-created
+boolean child column (`valid` → `Valid`). The only validator is
+MillionVerifier. By default only `ok` counts as valid. Set
+`accept_catchall: true` to also treat `catch_all` as valid. `PATCH` can change
+the mapped column or the flag; changing `accept_catchall` reclassifies existing
+succeeded cells and the boolean child from the stored result without calling
+MillionVerifier again.
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Email valid",
+    "type": "email_validation",
+    "email_validation": {
+      "email_column_id": "...",
+      "validator": "millionverifier",
+      "accept_catchall": false
+    }
+  }'
+```
+
+Runs use the same endpoint as sheriff and email enrichment:
+`POST /api/v1/tables/{table_id}/columns/{column_id}/runs`. A row is skipped when
+the mapped email is blank or not a valid address. `overwrite: false` skips rows
+whose parent cell `status` is `succeeded`. Parent cells are computed JSON and
+cannot be patched; the boolean child can. A succeeded cell looks like:
+
+```json
+{
+  "status": "succeeded",
+  "email": "ada@acme.com",
+  "validator": "millionverifier",
+  "result": "ok",
+  "valid": true,
+  "error": null
+}
+```
+
+Runs without MillionVerifier return 503. Concurrency uses
+`EMAIL_ENRICHMENT_CONCURRENCY`.
 
 

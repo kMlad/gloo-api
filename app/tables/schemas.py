@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.tables.email_enrichment.protocol import DEFAULT_EMAIL_PROVIDERS, EMAIL_PROVIDERS
 from app.tables.sheriff.protocol import SheriffOutputField
 
-ColumnType = Literal["text", "boolean", "sheriff", "email_enrichment"]
+ColumnType = Literal[
+    "text", "boolean", "sheriff", "email_enrichment", "email_validation"
+]
 EmailProvider = Literal["icypeas", "kitt", "leadmagic", "prospeo", "fullenrich"]
 EmailValidatorName = Literal["millionverifier"]
 FilterOperator = Literal["eq", "contains", "is_empty", "is_not_empty"]
@@ -17,7 +19,7 @@ SheriffRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"
 SheriffRunItemStatus = Literal[
     "queued", "running", "succeeded", "not_found", "failed", "skipped"
 ]
-COMPUTED_COLUMN_TYPES = {"sheriff", "email_enrichment"}
+COMPUTED_COLUMN_TYPES = {"sheriff", "email_enrichment", "email_validation"}
 
 
 class TableFilter(BaseModel):
@@ -108,11 +110,18 @@ class EmailEnrichmentConfig(BaseModel):
         return self
 
 
+class EmailValidationConfig(BaseModel):
+    email_column_id: UUID
+    validator: EmailValidatorName = "millionverifier"
+    accept_catchall: bool = False
+
+
 class ColumnCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: ColumnType = "text"
     sheriff: SheriffConfig | None = None
     email_enrichment: EmailEnrichmentConfig | None = None
+    email_validation: EmailValidationConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -124,24 +133,21 @@ class ColumnCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_typed_config(self) -> "ColumnCreate":
-        if self.type == "sheriff":
-            if self.sheriff is None:
-                raise ValueError("sheriff columns require a sheriff config")
-            if self.email_enrichment is not None:
-                raise ValueError("email_enrichment config is only valid when type is email_enrichment")
-            return self
-        if self.type == "email_enrichment":
-            if self.email_enrichment is None:
-                raise ValueError("email_enrichment columns require an email_enrichment config")
-            if self.sheriff is not None:
-                raise ValueError("sheriff config is only valid when type is sheriff")
-            return self
-        if self.sheriff is not None:
-            raise ValueError("sheriff config is only valid when type is sheriff")
-        if self.email_enrichment is not None:
-            raise ValueError(
-                "email_enrichment config is only valid when type is email_enrichment"
-            )
+        configs = {
+            "sheriff": self.sheriff,
+            "email_enrichment": self.email_enrichment,
+            "email_validation": self.email_validation,
+        }
+        for column_type, config in configs.items():
+            if self.type == column_type:
+                if config is None:
+                    raise ValueError(
+                        f"{column_type} columns require a {column_type} config"
+                    )
+            elif config is not None:
+                raise ValueError(
+                    f"{column_type} config is only valid when type is {column_type}"
+                )
         return self
 
 
@@ -150,6 +156,7 @@ class ColumnUpdate(BaseModel):
     hidden: bool | None = None
     sheriff: SheriffConfig | None = None
     email_enrichment: EmailEnrichmentConfig | None = None
+    email_validation: EmailValidationConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -168,6 +175,7 @@ class ColumnUpdate(BaseModel):
             and self.hidden is None
             and self.sheriff is None
             and self.email_enrichment is None
+            and self.email_validation is None
         ):
             raise ValueError("at least one column field must be provided")
         return self
@@ -209,7 +217,8 @@ class TableCreate(BaseModel):
             raise ValueError("column names must not contain duplicates")
         if any(column.type in COMPUTED_COLUMN_TYPES for column in self.columns):
             raise ValueError(
-                "sheriff and email_enrichment columns can only be added after the table exists"
+                "sheriff, email_enrichment, and email_validation columns "
+                "can only be added after the table exists"
             )
         return self
 

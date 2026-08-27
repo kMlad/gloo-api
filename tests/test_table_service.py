@@ -43,6 +43,8 @@ class FakeTableRepository:
         self.email_runs: dict[str, dict] = {}
         self.email_run_items: dict[str, dict] = {}
         self.email_attempts: list[dict] = []
+        self.validation_runs: dict[str, dict] = {}
+        self.validation_run_items: dict[str, dict] = {}
         self.perplexity_usage: list[dict] = []
         self.fail_usage_insert = False
 
@@ -121,6 +123,12 @@ class FakeTableRepository:
                 for item_id, item in list(self.email_run_items.items()):
                     if item["run_id"] == run_id:
                         del self.email_run_items[item_id]
+        for run_id, run in list(self.validation_runs.items()):
+            if run["table_id"] == table_id:
+                del self.validation_runs[run_id]
+                for item_id, item in list(self.validation_run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.validation_run_items[item_id]
         return existed
 
     async def list_columns(self, table_id: str) -> list[dict]:
@@ -206,6 +214,12 @@ class FakeTableRepository:
                 for item_id, item in list(self.email_run_items.items()):
                     if item["run_id"] == run_id:
                         del self.email_run_items[item_id]
+        for run_id, run in list(self.validation_runs.items()):
+            if run["column_id"] == column_id:
+                del self.validation_runs[run_id]
+                for item_id, item in list(self.validation_run_items.items()):
+                    if item["run_id"] == run_id:
+                        del self.validation_run_items[item_id]
         return existed
 
     async def max_column_position(self, table_id: str) -> int | None:
@@ -420,6 +434,61 @@ class FakeTableRepository:
             if attempt.get("run_id") in wanted
             and attempt.get("validation_result") == "catch_all"
         ]
+
+    async def insert_email_validation_run(self, record: dict) -> dict:
+        run_id = record.get("id") or str(uuid4())
+        stored = {**record, "id": run_id}
+        self.validation_runs[run_id] = stored
+        return deepcopy(stored)
+
+    async def update_email_validation_run(self, run_id: str, values: dict) -> dict | None:
+        run = self.validation_runs.get(run_id)
+        if run is None:
+            return None
+        run.update(values)
+        run["updated_at"] = _now()
+        return deepcopy(run)
+
+    async def get_email_validation_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict | None:
+        run = self.validation_runs.get(run_id)
+        if run is None:
+            return None
+        if run["table_id"] != table_id or run["column_id"] != column_id:
+            return None
+        return deepcopy(run)
+
+    async def get_email_validation_run_by_id(self, run_id: str) -> dict | None:
+        run = self.validation_runs.get(run_id)
+        return deepcopy(run) if run else None
+
+    async def insert_email_validation_run_items(self, items: list[dict]) -> list[dict]:
+        inserted = []
+        for item in items:
+            item_id = item.get("id") or str(uuid4())
+            stored = {**item, "id": item_id}
+            self.validation_run_items[item_id] = stored
+            inserted.append(deepcopy(stored))
+        return inserted
+
+    async def list_email_validation_run_items(self, run_id: str) -> list[dict]:
+        items = [
+            deepcopy(item)
+            for item in self.validation_run_items.values()
+            if item["run_id"] == run_id
+        ]
+        return sorted(items, key=lambda item: (item["created_at"], item["id"]))
+
+    async def update_email_validation_run_item(
+        self, item_id: str, values: dict
+    ) -> dict | None:
+        item = self.validation_run_items.get(item_id)
+        if item is None:
+            return None
+        item.update(values)
+        item["updated_at"] = _now()
+        return deepcopy(item)
 
     def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
         for existing in self.columns.values():

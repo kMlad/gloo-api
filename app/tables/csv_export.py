@@ -18,6 +18,10 @@ def format_csv_cell(column_type: str, value: Any) -> str:
             email = value.get("email")
             if isinstance(email, str) and email.strip():
                 return email.strip()
+        if column_type == "email_validation":
+            result = value.get("result")
+            if isinstance(result, str) and result:
+                return result
         status = value.get("status")
         if isinstance(status, str) and status:
             return status

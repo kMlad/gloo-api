@@ -27,6 +27,11 @@ def test_format_csv_cell_handles_primitives_and_computed_values() -> None:
         {"status": "succeeded", "email": "pat@acme.com"},
     ) == "pat@acme.com"
     assert format_csv_cell("email_enrichment", {"status": "not_found"}) == "not_found"
+    assert format_csv_cell(
+        "email_validation",
+        {"status": "succeeded", "result": "ok", "valid": True},
+    ) == "ok"
+    assert format_csv_cell("email_validation", {"status": "skipped"}) == "skipped"
     assert format_csv_cell("text", ["a", "b"]) == '["a", "b"]'
 
 

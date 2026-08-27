@@ -477,6 +477,85 @@ class TableRepository:
             attempts.extend(response.data)
         return attempts
 
+    async def insert_email_validation_run(self, record: dict[str, Any]) -> dict[str, Any]:
+        response = await (
+            self._db.table("table_email_validation_runs").insert(record).execute()
+        )
+        return response.data[0]
+
+    async def update_email_validation_run(
+        self, run_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = {"updated_at": to_iso(utc_now()), **values}
+        response = await (
+            self._db.table("table_email_validation_runs")
+            .update(payload)
+            .eq("id", run_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def get_email_validation_run(
+        self, table_id: str, column_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("table_email_validation_runs")
+            .select("*")
+            .eq("id", run_id)
+            .eq("table_id", table_id)
+            .eq("column_id", column_id)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def get_email_validation_run_by_id(
+        self, run_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("table_email_validation_runs")
+            .select("*")
+            .eq("id", run_id)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def insert_email_validation_run_items(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not items:
+            return []
+        response = await (
+            self._db.table("table_email_validation_run_items").insert(items).execute()
+        )
+        return response.data
+
+    async def list_email_validation_run_items(
+        self, run_id: str
+    ) -> list[dict[str, Any]]:
+        response = await (
+            self._db.table("table_email_validation_run_items")
+            .select("*")
+            .eq("run_id", run_id)
+            .order("created_at")
+            .order("id")
+            .execute()
+        )
+        return response.data
+
+    async def update_email_validation_run_item(
+        self, item_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = {"updated_at": to_iso(utc_now()), **values}
+        response = await (
+            self._db.table("table_email_validation_run_items")
+            .update(payload)
+            .eq("id", item_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
 
 def is_unique_violation(error: APIError) -> bool:
     return error.code == "23505"

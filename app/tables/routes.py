@@ -266,8 +266,20 @@ async def start_column_run(
                 service.execute_email_enrichment_run, str(run["id"])
             )
             return run
+        if column_type == "email_validation":
+            run = await service.start_email_validation_run(
+                str(table_id),
+                str(column_id),
+                request,
+                created_by=user.id,
+            )
+            background_tasks.add_task(
+                service.execute_email_validation_run, str(run["id"])
+            )
+            return run
         raise TableValidationError(
-            "Runs are only supported on sheriff and email_enrichment columns"
+            "Runs are only supported on sheriff, email_enrichment, "
+            "and email_validation columns"
         )
     except (
         TableNotFoundError,
