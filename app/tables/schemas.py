@@ -5,7 +5,12 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.tables.email_enrichment.protocol import DEFAULT_EMAIL_PROVIDERS, EMAIL_PROVIDERS
-from app.tables.sheriff.protocol import SheriffOutputField
+from app.tables.sheriff.protocol import (
+    DEFAULT_SHERIFF_MODEL,
+    SHERIFF_MODELS,
+    SheriffModel,
+    SheriffOutputField,
+)
 
 ColumnType = Literal[
     "text", "boolean", "sheriff", "email_enrichment", "email_validation"
@@ -49,6 +54,8 @@ class SheriffConfig(BaseModel):
     user_prompt: str = Field(min_length=1, max_length=8000)
     enhanced_prompt: str | None = Field(default=None, max_length=16_000)
     outputs: list[SheriffOutputField] = Field(min_length=1, max_length=10)
+    web_search: bool = True
+    model: SheriffModel = DEFAULT_SHERIFF_MODEL
 
     @field_validator("user_prompt")
     @classmethod
@@ -65,6 +72,13 @@ class SheriffConfig(BaseModel):
             return None
         prompt = value.strip()
         return prompt or None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def openai_model_only(cls, value: object) -> object:
+        if isinstance(value, str) and value not in SHERIFF_MODELS:
+            raise ValueError("model must be an OpenAI sheriff model")
+        return value
 
     @model_validator(mode="after")
     def unique_output_keys(self) -> "SheriffConfig":
@@ -323,6 +337,12 @@ class SheriffExpandResponse(BaseModel):
     enhanced_prompt: str
     outputs: list[SheriffOutputField]
     input_columns: list[SheriffInputColumn]
+
+
+class SheriffOptionsResponse(BaseModel):
+    models: list[SheriffModel]
+    default_model: SheriffModel
+    default_web_search: bool = True
 
 
 class SheriffRunCreate(BaseModel):

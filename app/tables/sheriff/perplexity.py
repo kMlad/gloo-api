@@ -7,9 +7,9 @@ from perplexity import AsyncPerplexity
 
 from app.tables.sheriff.prompts import (
     EXPAND_INSTRUCTIONS,
-    RESEARCH_INSTRUCTIONS,
     envelope_json_schema,
     expand_json_schema,
+    research_instructions,
 )
 from app.tables.sheriff.protocol import (
     PerplexityUsage,
@@ -64,15 +64,21 @@ class PerplexitySheriffAgent:
         )
 
     async def research(
-        self, *, prompt: str, outputs: list[SheriffOutputField]
+        self,
+        *,
+        prompt: str,
+        outputs: list[SheriffOutputField],
+        model: str | None = None,
+        web_search: bool = True,
     ) -> SheriffResearchResult:
         payload = await self._create(
             input=prompt,
-            instructions=RESEARCH_INSTRUCTIONS,
+            instructions=research_instructions(web_search=web_search),
             schema_name="sheriff_research",
             schema=envelope_json_schema(outputs),
-            search=True,
-            max_steps=4,
+            search=web_search,
+            max_steps=4 if web_search else 1,
+            model=model,
         )
         data = _parse_json_object(payload["text"])
         usage = payload.get("usage")
@@ -111,9 +117,11 @@ class PerplexitySheriffAgent:
         schema: dict[str, object],
         search: bool,
         max_steps: int,
+        model: str | None = None,
     ) -> dict[str, Any]:
+        chosen_model = model or self._model
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": chosen_model,
             "input": input,
             "instructions": instructions,
             "reasoning": {"effort": "low"},
@@ -135,7 +143,7 @@ class PerplexitySheriffAgent:
         text = _output_text(dumped)
         if not text:
             raise RuntimeError("Sheriff agent returned an empty response")
-        usage = parse_perplexity_usage(dumped, model=self._model)
+        usage = parse_perplexity_usage(dumped, model=chosen_model)
         if usage is not None:
             logger.info(
                 "sheriff usage cost model_cost=%s tool_calls_cost=%s total_cost=%s",

@@ -70,8 +70,22 @@ class FakeSheriffAgent:
         self.expand_calls.append({"goal": goal, "column_names": column_names})
         return self.expand_result
 
-    async def research(self, *, prompt: str, outputs: list[SheriffOutputField]):
-        self.research_calls.append({"prompt": prompt, "outputs": outputs})
+    async def research(
+        self,
+        *,
+        prompt: str,
+        outputs: list[SheriffOutputField],
+        model: str | None = None,
+        web_search: bool = True,
+    ):
+        self.research_calls.append(
+            {
+                "prompt": prompt,
+                "outputs": outputs,
+                "model": model,
+                "web_search": web_search,
+            }
+        )
         return self.research_result
 
 
@@ -150,6 +164,8 @@ async def test_create_sheriff_column_inserts_child_columns() -> None:
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     assert parent["type"] == "sheriff"
     assert parent["config"]["user_prompt"] == "Find the CEO of {{Company}}"
+    assert parent["config"]["web_search"] is True
+    assert parent["config"]["model"] == "openai/gpt-5.4-mini"
     children = [
         column
         for column in created["columns"]
@@ -209,6 +225,8 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     assert finished["status"] == "succeeded"
     assert finished["succeeded_count"] == 1
     assert agent.research_calls[0]["prompt"] == "Find the CEO of Acme"
+    assert agent.research_calls[0]["model"] == "openai/gpt-5.4-mini"
+    assert agent.research_calls[0]["web_search"] is True
 
     listed = await service.list_rows(table["id"], limit=100, offset=0)
     values = listed["items"][0]["values"]
@@ -231,6 +249,111 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     assert usage_row["tool_calls_cost"] == 0.003
     assert usage_row["total_cost"] == 0.01
     assert usage_row["tool_calls_details"] == {"search_web": {"invocation": 1}}
+
+
+@pytest.mark.asyncio
+async def test_sheriff_options_lists_openai_models() -> None:
+    service, _repository = _service()
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    options = await service.get_sheriff_options(table["id"])
+    assert options["default_model"] == "openai/gpt-5.4-mini"
+    assert options["default_web_search"] is True
+    assert options["models"][0].startswith("openai/")
+    assert all(item.startswith("openai/") for item in options["models"])
+    assert "openai/gpt-5.4-mini" in options["models"]
+    assert "anthropic/claude-sonnet-4-6" not in options["models"]
+
+
+@pytest.mark.asyncio
+async def test_create_sheriff_column_stores_model_and_web_search() -> None:
+    service, _repository = _service()
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    created = await service.add_column(
+        table["id"],
+        _sheriff_payload(
+            sheriff=SheriffConfig(
+                user_prompt="Find the CEO of {{Company}}",
+                web_search=False,
+                model="openai/gpt-5.4",
+                outputs=[SheriffOutputField(key="first_name", type="text")],
+            )
+        ),
+    )
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    assert parent["config"]["web_search"] is False
+    assert parent["config"]["model"] == "openai/gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_column_model_and_web_search() -> None:
+    agent = FakeSheriffAgent()
+    service, _repository = _service(agent)
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    created = await service.add_column(
+        table["id"],
+        _sheriff_payload(
+            sheriff=SheriffConfig(
+                user_prompt="Find the CEO of {{Company}}",
+                web_search=False,
+                model="openai/gpt-5.4-nano",
+                outputs=[
+                    SheriffOutputField(key="first_name", type="text"),
+                    SheriffOutputField(key="last_name", type="text"),
+                ],
+            )
+        ),
+    )
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    run = await service.start_sheriff_run(
+        table["id"],
+        parent["id"],
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_sheriff_run(run["id"])
+    assert agent.research_calls[0]["model"] == "openai/gpt-5.4-nano"
+    assert agent.research_calls[0]["web_search"] is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_sheriff_config_defaults_model_and_web_search() -> None:
+    agent = FakeSheriffAgent()
+    service, repository = _service(agent)
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    created = await service.add_column(table["id"], _sheriff_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    stored = repository.columns[str(parent["id"])]
+    stored["config"] = {
+        "user_prompt": stored["config"]["user_prompt"],
+        "enhanced_prompt": stored["config"].get("enhanced_prompt"),
+        "outputs": stored["config"]["outputs"],
+        "input_column_ids": stored["config"]["input_column_ids"],
+    }
+    run = await service.start_sheriff_run(
+        table["id"],
+        parent["id"],
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_sheriff_run(run["id"])
+    assert agent.research_calls[0]["model"] == "openai/gpt-5.4-mini"
+    assert agent.research_calls[0]["web_search"] is True
 
 
 @pytest.mark.asyncio
@@ -266,10 +389,22 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
             self.entered = asyncio.Event()
             self.gate = asyncio.Event()
 
-        async def research(self, *, prompt: str, outputs: list[SheriffOutputField]):
+        async def research(
+            self,
+            *,
+            prompt: str,
+            outputs: list[SheriffOutputField],
+            model: str | None = None,
+            web_search: bool = True,
+        ):
             self.entered.set()
             await self.gate.wait()
-            return await super().research(prompt=prompt, outputs=outputs)
+            return await super().research(
+                prompt=prompt,
+                outputs=outputs,
+                model=model,
+                web_search=web_search,
+            )
 
     agent = GatedAgent()
     service = TableService(

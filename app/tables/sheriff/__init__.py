@@ -1,7 +1,10 @@
 from app.tables.sheriff.protocol import (
+    DEFAULT_SHERIFF_MODEL,
+    SHERIFF_MODELS,
     PerplexityUsage,
     SheriffAgent,
     SheriffExpandResult,
+    SheriffModel,
     SheriffOutputField,
     SheriffResearchResult,
     SheriffSource,
@@ -11,9 +14,12 @@ from app.tables.sheriff.protocol import (
 )
 
 __all__ = [
+    "DEFAULT_SHERIFF_MODEL",
+    "SHERIFF_MODELS",
     "PerplexityUsage",
     "SheriffAgent",
     "SheriffExpandResult",
+    "SheriffModel",
     "SheriffOutputField",
     "SheriffResearchResult",
     "SheriffSource",

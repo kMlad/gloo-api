@@ -78,6 +78,15 @@ class SheriffServiceStub:
             "input_columns": [{"id": str(uuid4()), "name": "Company"}],
         }
 
+    async def get_sheriff_options(self, table_id: str) -> dict[str, Any]:
+        if table_id == "missing":
+            raise TableNotFoundError("Table not found")
+        return {
+            "models": ["openai/gpt-5.4-mini", "openai/gpt-5.4"],
+            "default_model": "openai/gpt-5.4-mini",
+            "default_web_search": True,
+        }
+
     async def get_column(self, table_id: str, column_id: str) -> dict[str, Any]:
         return {
             "id": column_id,
@@ -180,6 +189,16 @@ async def test_expand_and_run_routes() -> None:
         )
         assert expanded.status_code == 200
         assert expanded.json()["outputs"][0]["key"] == "first_name"
+
+        options = await client.get(
+            f"/api/v1/tables/{table_id}/sheriff/options",
+            headers=_headers(),
+        )
+        assert options.status_code == 200
+        body = options.json()
+        assert body["default_model"] == "openai/gpt-5.4-mini"
+        assert body["default_web_search"] is True
+        assert "openai/gpt-5.4-mini" in body["models"]
 
         started = await client.post(
             f"/api/v1/tables/{table_id}/columns/{column_id}/runs",

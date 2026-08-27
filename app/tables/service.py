@@ -20,6 +20,8 @@ from app.tables.email_enrichment.inputs import (
 )
 from app.tables.email_enrichment.protocol import AttemptRecord, WaterfallStep
 from app.tables.sheriff import (
+    DEFAULT_SHERIFF_MODEL,
+    SHERIFF_MODELS,
     PerplexityUsage,
     SheriffAgent,
     SheriffUnavailableError,
@@ -548,6 +550,14 @@ class TableService:
         await self._repository.update_table(table_id)
         return await self.get_sheriff_run(table_id, column_id, run_id)
 
+    async def get_sheriff_options(self, table_id: str) -> dict[str, Any]:
+        await self._require_table(table_id)
+        return {
+            "models": list(SHERIFF_MODELS),
+            "default_model": DEFAULT_SHERIFF_MODEL,
+            "default_web_search": True,
+        }
+
     async def execute_sheriff_run(self, run_id: str) -> None:
         run = await self._repository.get_sheriff_run_by_id(run_id)
         if run is None:
@@ -585,6 +595,8 @@ class TableService:
                         children=children,
                         prompt=prompt,
                         outputs=config.outputs,
+                        model=config.model,
+                        web_search=config.web_search,
                         item=item,
                         row=rows.get(str(item["row_id"])),
                     )
@@ -1573,6 +1585,8 @@ class TableService:
         children: dict[str, dict[str, Any]],
         prompt: str,
         outputs: list[SheriffOutputField],
+        model: str,
+        web_search: bool,
         item: dict[str, Any],
         row: dict[str, Any] | None,
     ) -> None:
@@ -1602,7 +1616,12 @@ class TableService:
                 _interpolation_values(columns, values),
                 invalid_names=_sheriff_column_names(columns),
             )
-            result = await agent.research(prompt=interpolated, outputs=outputs)
+            result = await agent.research(
+                prompt=interpolated,
+                outputs=outputs,
+                model=model,
+                web_search=web_search,
+            )
         except (UnknownPlaceholderError, InvalidPlaceholderError) as error:
             values[column_id] = _sheriff_cell(status="failed", error=str(error))
             await self._repository.replace_row_values([(row_id, values)])
@@ -1987,19 +2006,24 @@ def _sheriff_config_record(
         "enhanced_prompt": sheriff.enhanced_prompt,
         "outputs": [field.model_dump() for field in sheriff.outputs],
         "input_column_ids": [str(column["id"]) for column in input_columns],
+        "web_search": sheriff.web_search,
+        "model": sheriff.model,
     }
 
 
 def _parse_sheriff_config(raw: Any) -> SheriffConfig:
     if not isinstance(raw, dict):
         raise TableValidationError("Sheriff column is missing config")
-    return SheriffConfig.model_validate(
-        {
-            "user_prompt": raw.get("user_prompt") or "",
-            "enhanced_prompt": raw.get("enhanced_prompt"),
-            "outputs": raw.get("outputs") or [],
-        }
-    )
+    payload: dict[str, Any] = {
+        "user_prompt": raw.get("user_prompt") or "",
+        "enhanced_prompt": raw.get("enhanced_prompt"),
+        "outputs": raw.get("outputs") or [],
+    }
+    if "web_search" in raw:
+        payload["web_search"] = raw["web_search"]
+    if raw.get("model"):
+        payload["model"] = raw["model"]
+    return SheriffConfig.model_validate(payload)
 
 
 def _resolve_input_columns(

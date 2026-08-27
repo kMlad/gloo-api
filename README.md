@@ -201,8 +201,11 @@ POST /api/v1/tables/{table_id}/sheriff/prompts/expand
 
 Create a sheriff column with a user prompt and output fields (`text` or
 `boolean`, max 10). Expanding the prompt is optional; if `enhanced_prompt` is
-omitted, runs interpolate `user_prompt`. The response is the full table,
-including auto-created child columns (`first_name` → `First name`).
+omitted, runs interpolate `user_prompt`. Optional `web_search` (default
+`true`) and `model` (OpenAI models only, default `openai/gpt-5.4-mini`) are
+stored on the column and used for runs. List allowed models with
+`GET /api/v1/tables/{table_id}/sheriff/options`. The response is the full
+table, including auto-created child columns (`first_name` → `First name`).
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
@@ -213,6 +216,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
     "type": "sheriff",
     "sheriff": {
       "user_prompt": "Find the CEO of {{Company}}",
+      "web_search": true,
+      "model": "openai/gpt-5.4-mini",
       "outputs": [
         {"key": "first_name", "type": "text"},
         {"key": "last_name", "type": "text"}
@@ -247,10 +252,11 @@ can. A succeeded cell looks like:
 }
 ```
 
-Sheriff uses the Perplexity Agent API (`web_search` only) with
-`PERPLEXITY_API_KEY`. Perplexity Pro/Max app plans do not include API access.
+Sheriff uses the Perplexity Agent API with `PERPLEXITY_API_KEY`. Runs use the
+column's `model` and `web_search` flag (`web_search` adds the Perplexity
+`web_search` tool). Perplexity Pro/Max app plans do not include API access.
 Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
-(default `openai/gpt-5.4-mini`), `SHERIFF_TIMEOUT_SECONDS`,
+(default `openai/gpt-5.4-mini`, used for prompt expand), `SHERIFF_TIMEOUT_SECONDS`,
 `SHERIFF_CONCURRENCY`.
 
 Create an email enrichment column after mapping first name, last name, LinkedIn

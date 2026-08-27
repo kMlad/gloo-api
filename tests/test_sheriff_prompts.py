@@ -51,3 +51,24 @@ def test_column_create_requires_sheriff_config() -> None:
         )
     with pytest.raises(ValidationError, match="snake_case"):
         SheriffOutputField(key="First Name", type="text")
+
+
+def test_sheriff_config_defaults_and_rejects_non_openai_models() -> None:
+    config = SheriffConfig(
+        user_prompt="Find X",
+        outputs=[SheriffOutputField(key="first_name", type="text")],
+    )
+    assert config.web_search is True
+    assert config.model == "openai/gpt-5.4-mini"
+    with pytest.raises(ValidationError, match="OpenAI sheriff model"):
+        SheriffConfig(
+            user_prompt="Find X",
+            model="anthropic/claude-sonnet-4-6",
+            outputs=[SheriffOutputField(key="first_name", type="text")],
+        )
+    with pytest.raises(ValidationError, match="OpenAI sheriff model"):
+        SheriffConfig(
+            user_prompt="Find X",
+            model="openai/gpt-unknown",
+            outputs=[SheriffOutputField(key="first_name", type="text")],
+        )

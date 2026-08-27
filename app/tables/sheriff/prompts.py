@@ -29,6 +29,21 @@ Set confidence to low when evidence is thin, second-hand, or only a SERP
 headline match. Never ask follow-up questions — answer from search.
 """
 
+RESEARCH_INSTRUCTIONS_NO_SEARCH = """\
+You are a careful researcher. Do not invent facts. Answer from your existing
+knowledge only — do not search the web or fetch URLs.
+If you cannot verify a field, return null for that field (or an empty value)
+rather than guessing. Sources may be empty.
+Set confidence to low when evidence is thin or uncertain.
+Never ask follow-up questions.
+"""
+
+
+def research_instructions(*, web_search: bool) -> str:
+    if web_search:
+        return RESEARCH_INSTRUCTIONS
+    return RESEARCH_INSTRUCTIONS_NO_SEARCH
+
 
 def validate_output_key(value: str) -> str:
     key = value.strip()

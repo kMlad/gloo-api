@@ -23,6 +23,7 @@ from app.tables.csv_import import CsvImportError
 from app.tables.schemas import (
     SheriffExpandRequest,
     SheriffExpandResponse,
+    SheriffOptionsResponse,
     SheriffRunCreate,
     SheriffRunResponse,
     ColumnCreate,
@@ -208,6 +209,20 @@ async def delete_column(
     except TableNotFoundError as error:
         raise _map_table_error(error) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{table_id}/sheriff/options",
+    response_model=SheriffOptionsResponse,
+)
+async def get_sheriff_options(
+    table_id: UUID,
+    service: ServiceDependency,
+) -> dict[str, Any]:
+    try:
+        return await service.get_sheriff_options(str(table_id))
+    except TableNotFoundError as error:
+        raise _map_table_error(error) from error
 
 
 @router.post(

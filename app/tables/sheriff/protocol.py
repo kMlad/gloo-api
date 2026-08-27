@@ -1,4 +1,4 @@
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -6,6 +6,21 @@ from app.tables.sheriff.prompts import validate_output_key
 
 Confidence = Literal["high", "medium", "low"]
 OutputFieldType = Literal["text", "boolean"]
+SheriffModel = Literal[
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
+    "openai/gpt-5.5",
+    "openai/gpt-5.4",
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4-nano",
+    "openai/gpt-5.2",
+    "openai/gpt-5.1",
+    "openai/gpt-5",
+    "openai/gpt-5-mini",
+]
+SHERIFF_MODELS: tuple[SheriffModel, ...] = get_args(SheriffModel)
+DEFAULT_SHERIFF_MODEL: SheriffModel = "openai/gpt-5.4-mini"
 
 
 class SheriffOutputField(BaseModel):
@@ -93,7 +108,12 @@ class SheriffAgent(Protocol):
     ) -> SheriffExpandResult: ...
 
     async def research(
-        self, *, prompt: str, outputs: list[SheriffOutputField]
+        self,
+        *,
+        prompt: str,
+        outputs: list[SheriffOutputField],
+        model: str | None = None,
+        web_search: bool = True,
     ) -> SheriffResearchResult: ...
 
 
