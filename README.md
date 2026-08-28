@@ -202,10 +202,12 @@ POST /api/v1/tables/{table_id}/sheriff/prompts/expand
 Create a sheriff column with a user prompt and output fields (`text` or
 `boolean`, max 10). Expanding the prompt is optional; if `enhanced_prompt` is
 omitted, runs interpolate `user_prompt`. Optional `web_search` (default
-`true`) and `model` (OpenAI models only, default `openai/gpt-5.4-mini`) are
-stored on the column and used for runs. List allowed models with
-`GET /api/v1/tables/{table_id}/sheriff/options`. The response is the full
-table, including auto-created child columns (`first_name` → `First name`).
+`true`), `web_search_limit` (1–20 web_search calls per row; omit for the
+default 4-step loop), and `model` (OpenAI models only, default
+`openai/gpt-5.4-mini`) are stored on the column and used for runs. List
+allowed models with `GET /api/v1/tables/{table_id}/sheriff/options`. The
+response is the full table, including auto-created child columns
+(`first_name` → `First name`).
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
@@ -217,6 +219,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
     "sheriff": {
       "user_prompt": "Find the CEO of {{Company}}",
       "web_search": true,
+      "web_search_limit": 2,
       "model": "openai/gpt-5.4-mini",
       "outputs": [
         {"key": "first_name", "type": "text"},
@@ -226,8 +229,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/tables/$TABLE_ID/columns \
   }'
 ```
 
-Run one row, selected rows, or the whole table (omit `row_ids`). Max 100 rows
-per run. Returns **202** with the run and items in `queued` status. Parent
+Run one row, selected rows, or the whole table (omit `row_ids`). Returns
+**202** with the run and items in `queued` status. Parent
 cells start as `queued`, then flip to `running` when a worker picks them up
 (`SHERIFF_CONCURRENCY`, default 3). Poll
 `GET /api/v1/tables/{table_id}/columns/{column_id}/runs/{run_id}`.
@@ -254,7 +257,9 @@ can. A succeeded cell looks like:
 
 Sheriff uses the Perplexity Agent API with `PERPLEXITY_API_KEY`. Runs use the
 column's `model` and `web_search` flag (`web_search` adds the Perplexity
-`web_search` tool). Perplexity Pro/Max app plans do not include API access.
+`web_search` tool). Optional `web_search_limit` caps how many times that tool
+may be called; `max_steps` is set to `limit + 1` so the model still has a
+final answer turn. Perplexity Pro/Max app plans do not include API access.
 Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
 (default `openai/gpt-5.4-mini`, used for prompt expand), `SHERIFF_TIMEOUT_SECONDS`,
 `SHERIFF_CONCURRENCY`.

@@ -39,10 +39,18 @@ Never ask follow-up questions.
 """
 
 
-def research_instructions(*, web_search: bool) -> str:
-    if web_search:
+def research_instructions(
+    *, web_search: bool, web_search_limit: int | None = None
+) -> str:
+    if not web_search:
+        return RESEARCH_INSTRUCTIONS_NO_SEARCH
+    if web_search_limit is None:
         return RESEARCH_INSTRUCTIONS
-    return RESEARCH_INSTRUCTIONS_NO_SEARCH
+    calls = "call" if web_search_limit == 1 else "calls"
+    return (
+        RESEARCH_INSTRUCTIONS
+        + f"\nMake at most {web_search_limit} web_search {calls} before concluding."
+    )
 
 
 def validate_output_key(value: str) -> str:

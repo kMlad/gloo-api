@@ -60,7 +60,6 @@ from app.utils import to_iso, utc_now
 logger = logging.getLogger(__name__)
 
 _POSITION_OFFSET = 10_000
-_MAX_SHERIFF_RUN_ROWS = 100
 _VALIDATION_HARD_ERRORS = {"failed", "rate_limited", "timed_out"}
 
 
@@ -597,6 +596,7 @@ class TableService:
                         outputs=config.outputs,
                         model=config.model,
                         web_search=config.web_search,
+                        web_search_limit=config.web_search_limit,
                         item=item,
                         row=rows.get(str(item["row_id"])),
                     )
@@ -1587,6 +1587,7 @@ class TableService:
         outputs: list[SheriffOutputField],
         model: str,
         web_search: bool,
+        web_search_limit: int | None,
         item: dict[str, Any],
         row: dict[str, Any] | None,
     ) -> None:
@@ -1621,6 +1622,7 @@ class TableService:
                 outputs=outputs,
                 model=model,
                 web_search=web_search,
+                web_search_limit=web_search_limit,
             )
         except (UnknownPlaceholderError, InvalidPlaceholderError) as error:
             values[column_id] = _sheriff_cell(status="failed", error=str(error))
@@ -2007,6 +2009,7 @@ def _sheriff_config_record(
         "outputs": [field.model_dump() for field in sheriff.outputs],
         "input_column_ids": [str(column["id"]) for column in input_columns],
         "web_search": sheriff.web_search,
+        "web_search_limit": sheriff.web_search_limit,
         "model": sheriff.model,
     }
 
@@ -2021,6 +2024,8 @@ def _parse_sheriff_config(raw: Any) -> SheriffConfig:
     }
     if "web_search" in raw:
         payload["web_search"] = raw["web_search"]
+    if "web_search_limit" in raw:
+        payload["web_search_limit"] = raw["web_search_limit"]
     if raw.get("model"):
         payload["model"] = raw["model"]
     return SheriffConfig.model_validate(payload)
@@ -2064,10 +2069,6 @@ def _select_run_rows(
     rows: list[dict[str, Any]], row_ids: list[UUID] | None
 ) -> list[dict[str, Any]]:
     if row_ids is None:
-        if len(rows) > _MAX_SHERIFF_RUN_ROWS:
-            raise TableValidationError(
-                f"a run may include at most {_MAX_SHERIFF_RUN_ROWS} rows"
-            )
         return rows
     by_id = {str(row["id"]): row for row in rows}
     selected: list[dict[str, Any]] = []
@@ -2076,10 +2077,6 @@ def _select_run_rows(
         if row is None:
             raise TableValidationError(f"Unknown row {row_id}")
         selected.append(row)
-    if len(selected) > _MAX_SHERIFF_RUN_ROWS:
-        raise TableValidationError(
-            f"a run may include at most {_MAX_SHERIFF_RUN_ROWS} rows"
-        )
     return selected
 
 

@@ -114,6 +114,7 @@ class SheriffAgent(Protocol):
         outputs: list[SheriffOutputField],
         model: str | None = None,
         web_search: bool = True,
+        web_search_limit: int | None = None,
     ) -> SheriffResearchResult: ...
 
 

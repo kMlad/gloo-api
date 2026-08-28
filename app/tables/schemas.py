@@ -55,6 +55,7 @@ class SheriffConfig(BaseModel):
     enhanced_prompt: str | None = Field(default=None, max_length=16_000)
     outputs: list[SheriffOutputField] = Field(min_length=1, max_length=10)
     web_search: bool = True
+    web_search_limit: int | None = Field(default=None, ge=1, le=20)
     model: SheriffModel = DEFAULT_SHERIFF_MODEL
 
     @field_validator("user_prompt")
@@ -363,8 +364,6 @@ class SheriffRunCreate(BaseModel):
                 continue
             seen.add(row_id)
             unique.append(row_id)
-        if len(unique) > 100:
-            raise ValueError("a run may include at most 100 rows")
         return unique
 
 

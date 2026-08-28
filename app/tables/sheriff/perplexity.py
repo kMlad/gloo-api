@@ -22,6 +22,7 @@ from app.tables.sheriff.protocol import (
 logger = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_DEFAULT_SEARCH_MAX_STEPS = 4
 
 
 class PerplexitySheriffAgent:
@@ -70,14 +71,17 @@ class PerplexitySheriffAgent:
         outputs: list[SheriffOutputField],
         model: str | None = None,
         web_search: bool = True,
+        web_search_limit: int | None = None,
     ) -> SheriffResearchResult:
         payload = await self._create(
             input=prompt,
-            instructions=research_instructions(web_search=web_search),
+            instructions=research_instructions(
+                web_search=web_search, web_search_limit=web_search_limit
+            ),
             schema_name="sheriff_research",
             schema=envelope_json_schema(outputs),
             search=web_search,
-            max_steps=4 if web_search else 1,
+            max_steps=_research_max_steps(web_search, web_search_limit),
             model=model,
         )
         data = _parse_json_object(payload["text"])
@@ -156,6 +160,16 @@ class PerplexitySheriffAgent:
             "sources": _search_sources(dumped),
             "usage": usage,
         }
+
+
+def _research_max_steps(
+    web_search: bool, web_search_limit: int | None
+) -> int:
+    if not web_search:
+        return 1
+    if web_search_limit is None:
+        return _DEFAULT_SEARCH_MAX_STEPS
+    return web_search_limit + 1
 
 
 def _dump(value: Any) -> dict[str, Any]:

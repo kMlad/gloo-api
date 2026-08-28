@@ -77,6 +77,7 @@ class FakeSheriffAgent:
         outputs: list[SheriffOutputField],
         model: str | None = None,
         web_search: bool = True,
+        web_search_limit: int | None = None,
     ):
         self.research_calls.append(
             {
@@ -84,6 +85,7 @@ class FakeSheriffAgent:
                 "outputs": outputs,
                 "model": model,
                 "web_search": web_search,
+                "web_search_limit": web_search_limit,
             }
         )
         return self.research_result
@@ -165,6 +167,7 @@ async def test_create_sheriff_column_inserts_child_columns() -> None:
     assert parent["type"] == "sheriff"
     assert parent["config"]["user_prompt"] == "Find the CEO of {{Company}}"
     assert parent["config"]["web_search"] is True
+    assert parent["config"]["web_search_limit"] is None
     assert parent["config"]["model"] == "openai/gpt-5.4-mini"
     children = [
         column
@@ -280,6 +283,7 @@ async def test_create_sheriff_column_stores_model_and_web_search() -> None:
             sheriff=SheriffConfig(
                 user_prompt="Find the CEO of {{Company}}",
                 web_search=False,
+                web_search_limit=2,
                 model="openai/gpt-5.4",
                 outputs=[SheriffOutputField(key="first_name", type="text")],
             )
@@ -287,6 +291,7 @@ async def test_create_sheriff_column_stores_model_and_web_search() -> None:
     )
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
     assert parent["config"]["web_search"] is False
+    assert parent["config"]["web_search_limit"] == 2
     assert parent["config"]["model"] == "openai/gpt-5.4"
 
 
@@ -305,7 +310,8 @@ async def test_run_uses_column_model_and_web_search() -> None:
         _sheriff_payload(
             sheriff=SheriffConfig(
                 user_prompt="Find the CEO of {{Company}}",
-                web_search=False,
+                web_search=True,
+                web_search_limit=2,
                 model="openai/gpt-5.4-nano",
                 outputs=[
                     SheriffOutputField(key="first_name", type="text"),
@@ -323,7 +329,8 @@ async def test_run_uses_column_model_and_web_search() -> None:
     )
     await service.execute_sheriff_run(run["id"])
     assert agent.research_calls[0]["model"] == "openai/gpt-5.4-nano"
-    assert agent.research_calls[0]["web_search"] is False
+    assert agent.research_calls[0]["web_search"] is True
+    assert agent.research_calls[0]["web_search_limit"] == 2
 
 
 @pytest.mark.asyncio
@@ -354,6 +361,7 @@ async def test_legacy_sheriff_config_defaults_model_and_web_search() -> None:
     await service.execute_sheriff_run(run["id"])
     assert agent.research_calls[0]["model"] == "openai/gpt-5.4-mini"
     assert agent.research_calls[0]["web_search"] is True
+    assert agent.research_calls[0]["web_search_limit"] is None
 
 
 @pytest.mark.asyncio
@@ -396,6 +404,7 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
             outputs: list[SheriffOutputField],
             model: str | None = None,
             web_search: bool = True,
+            web_search_limit: int | None = None,
         ):
             self.entered.set()
             await self.gate.wait()
@@ -404,6 +413,7 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
                 outputs=outputs,
                 model=model,
                 web_search=web_search,
+                web_search_limit=web_search_limit,
             )
 
     agent = GatedAgent()
@@ -524,6 +534,30 @@ async def test_run_selected_all_and_overwrite_skip() -> None:
     assert {str(first_row["id"]), str(second_row["id"])} == {
         item["row_id"] for item in overwrite["items"]
     }
+
+
+@pytest.mark.asyncio
+async def test_run_accepts_more_than_100_rows() -> None:
+    service, _repository = _service(FakeSheriffAgent())
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    for index in range(101):
+        await service.add_row(
+            table["id"], RowCreate(values={company_id: f"Company {index}"})
+        )
+    created = await service.add_column(table["id"], _sheriff_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    run = await service.start_sheriff_run(
+        table["id"],
+        parent["id"],
+        SheriffRunCreate(),
+        created_by=str(uuid4()),
+    )
+    assert run["total_count"] == 101
+    assert len(run["items"]) == 101
 
 
 @pytest.mark.asyncio

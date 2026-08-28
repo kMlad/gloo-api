@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,7 +10,13 @@ from app.tables.sheriff.prompts import (
     unique_child_name,
 )
 from app.tables.sheriff.protocol import UnknownPlaceholderError
-from app.tables.schemas import SheriffConfig, SheriffOutputField, ColumnCreate, TableCreate
+from app.tables.schemas import (
+    SheriffConfig,
+    SheriffOutputField,
+    SheriffRunCreate,
+    ColumnCreate,
+    TableCreate,
+)
 
 
 def test_placeholder_interpolation_and_child_names() -> None:
@@ -59,6 +67,7 @@ def test_sheriff_config_defaults_and_rejects_non_openai_models() -> None:
         outputs=[SheriffOutputField(key="first_name", type="text")],
     )
     assert config.web_search is True
+    assert config.web_search_limit is None
     assert config.model == "openai/gpt-5.4-mini"
     with pytest.raises(ValidationError, match="OpenAI sheriff model"):
         SheriffConfig(
@@ -72,3 +81,23 @@ def test_sheriff_config_defaults_and_rejects_non_openai_models() -> None:
             model="openai/gpt-unknown",
             outputs=[SheriffOutputField(key="first_name", type="text")],
         )
+    with pytest.raises(ValidationError):
+        SheriffConfig(
+            user_prompt="Find X",
+            web_search_limit=0,
+            outputs=[SheriffOutputField(key="first_name", type="text")],
+        )
+    with pytest.raises(ValidationError):
+        SheriffConfig(
+            user_prompt="Find X",
+            web_search_limit=21,
+            outputs=[SheriffOutputField(key="first_name", type="text")],
+        )
+
+
+def test_sheriff_run_create_accepts_more_than_100_row_ids() -> None:
+    row_ids = [uuid4() for _ in range(101)]
+    payload = SheriffRunCreate(row_ids=row_ids)
+    assert len(payload.row_ids or []) == 101
+    with pytest.raises(ValidationError, match="must not be empty"):
+        SheriffRunCreate(row_ids=[])

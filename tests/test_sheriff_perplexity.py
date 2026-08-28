@@ -163,6 +163,22 @@ async def test_research_uses_requested_model_and_web_search_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_research_caps_web_search_calls_when_limit_is_set() -> None:
+    client = _FakeClient()
+    agent = PerplexitySheriffAgent(client, model="openai/gpt-5.4-mini")
+    await agent.research(
+        prompt="Find Ada",
+        outputs=[SheriffOutputField(key="first_name", type="text")],
+        web_search=True,
+        web_search_limit=2,
+    )
+    assert client.responses.kwargs is not None
+    assert client.responses.kwargs["tools"] == [{"type": "web_search"}]
+    assert client.responses.kwargs["max_steps"] == 3
+    assert "at most 2 web_search calls" in client.responses.kwargs["instructions"]
+
+
+@pytest.mark.asyncio
 async def test_research_omits_web_search_tool_when_disabled() -> None:
     client = _FakeClient()
     agent = PerplexitySheriffAgent(client, model="openai/gpt-5.4-mini")
@@ -171,6 +187,7 @@ async def test_research_omits_web_search_tool_when_disabled() -> None:
         outputs=[SheriffOutputField(key="first_name", type="text")],
         model="openai/gpt-5.4-nano",
         web_search=False,
+        web_search_limit=2,
     )
     assert client.responses.kwargs is not None
     assert client.responses.kwargs["model"] == "openai/gpt-5.4-nano"
