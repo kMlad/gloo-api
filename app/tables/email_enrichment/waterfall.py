@@ -91,6 +91,16 @@ async def run_waterfall(
                     validation=_email_validation(verification, valid),
                 )
             )
+            if verification.status in _HARD_ERRORS:
+                steps.append(step)
+                return WaterfallOutcome(
+                    status="failed",
+                    rejected_emails=rejected_order,
+                    attempts=attempts,
+                    steps=steps,
+                    error=verification.error_message
+                    or "MillionVerifier verification failed",
+                )
             if valid:
                 steps.append(step)
                 return WaterfallOutcome(

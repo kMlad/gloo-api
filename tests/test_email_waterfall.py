@@ -175,6 +175,85 @@ async def test_waterfall_failed_when_every_provider_errors() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "http_status", "error_code", "error_message", "expected_error"),
+    [
+        (
+            "rate_limited",
+            429,
+            "rate_limit",
+            "MillionVerifier is temporarily unavailable",
+            "MillionVerifier is temporarily unavailable",
+        ),
+        (
+            "timed_out",
+            None,
+            "read_timeout",
+            "MillionVerifier is temporarily unavailable",
+            "MillionVerifier is temporarily unavailable",
+        ),
+        (
+            "failed",
+            503,
+            "provider_unavailable",
+            None,
+            "MillionVerifier verification failed",
+        ),
+    ],
+)
+async def test_waterfall_stops_on_validator_hard_error(
+    status: str,
+    http_status: int | None,
+    error_code: str,
+    error_message: str | None,
+    expected_error: str,
+) -> None:
+    email = "ada@acme.com"
+    finder = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=[email])
+    )
+    later = FakeFinder(
+        FindEmailResult(status="found", request_payload={}, emails=["later@acme.com"])
+    )
+
+    class HardErrorValidator:
+        async def verify(self, candidate: str) -> ValidationResult:
+            return ValidationResult(
+                status=status,
+                request_payload={"email": candidate},
+                response_payload={"code": error_code},
+                http_status=http_status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+    outcome = await run_waterfall(
+        providers=["icypeas", "kitt"],
+        finders={"icypeas": finder, "kitt": later},
+        validator=HardErrorValidator(),
+        inputs=_INPUTS,
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error == expected_error
+    assert outcome.rejected_emails == []
+    assert later.calls == 0
+    assert [step.as_dict() for step in outcome.steps] == [
+        {
+            "provider": "icypeas",
+            "status": "found",
+            "emails": [{"email": email, "validation": status}],
+        }
+    ]
+    validator_attempt = outcome.attempts[-1]
+    assert validator_attempt.provider == "millionverifier"
+    assert validator_attempt.status == status
+    assert validator_attempt.http_status == http_status
+    assert validator_attempt.error_code == error_code
+    assert validator_attempt.error_message == error_message
+
+
+@pytest.mark.asyncio
 async def test_waterfall_rejects_catchall_when_flag_off() -> None:
     finder = FakeFinder(
         FindEmailResult(status="found", request_payload={}, emails=["ada@acme.com"])

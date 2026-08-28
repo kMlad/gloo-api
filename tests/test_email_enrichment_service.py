@@ -385,6 +385,89 @@ async def test_email_enrichment_rechecks_rejected_emails_on_a_new_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_email_enrichment_retries_candidate_after_transient_validation_failure() -> None:
+    email = "ada@acme.com"
+    finder = FakeFinder(emails=[email])
+
+    class TransientValidator:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def verify(self, candidate: str) -> ValidationResult:
+            self.calls.append(candidate)
+            if len(self.calls) == 1:
+                return ValidationResult(
+                    status="rate_limited",
+                    request_payload={"email": candidate},
+                    http_status=429,
+                    error_code="rate_limit",
+                    error_message="MillionVerifier rate limit exceeded",
+                )
+            return ValidationResult(
+                status="ok",
+                request_payload={"email": candidate},
+                result="ok",
+            )
+
+    validator = TransientValidator()
+    service, _repository = _service(
+        email_finders={"icypeas": finder},
+        email_validator=validator,
+    )
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(ids, email_enrichment=_column_ids(ids)),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    row = await service.add_row(
+        table["id"],
+        RowCreate(
+            values={
+                ids["First name"]: "Ada",
+                ids["Last name"]: "Lovelace",
+                ids["LinkedIn"]: "https://www.linkedin.com/in/ada",
+                ids["Company"]: "Acme",
+                ids["Domain"]: "acme.com",
+            }
+        ),
+    )
+
+    first = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(first["id"]))
+    first_cell = (
+        await service.list_rows(table["id"], limit=10, offset=0)
+    )["items"][0]["values"][str(parent["id"])]
+    assert first_cell["status"] == "failed"
+    assert first_cell["error"] == "MillionVerifier rate limit exceeded"
+    assert first_cell["rejected_emails"] == []
+
+    second = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(second["id"]))
+    second_cell = (
+        await service.list_rows(table["id"], limit=10, offset=0)
+    )["items"][0]["values"][str(parent["id"])]
+
+    assert finder.calls == 2
+    assert validator.calls == [email, email]
+    assert second_cell["status"] == "succeeded"
+    assert second_cell["email"] == email
+    assert second_cell["rejected_emails"] == []
+
+
+@pytest.mark.asyncio
 async def test_email_enrichment_cell_includes_waterfall_steps() -> None:
     icypeas = FakeFinder(emails=["test@gmail.com"])
     kitt = FakeFinder(emails=["test@gmail.com"])
