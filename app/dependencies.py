@@ -1,7 +1,7 @@
 from fastapi import Request
 
-from app.repositories import Repository
 from app.phone_enrichment.service import PhoneEnrichmentService
+from app.repositories import Repository
 from app.smartlead.client import SmartLeadClient
 from app.tables.service import TableService
 

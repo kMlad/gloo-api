@@ -11,8 +11,8 @@ from app.dependencies import get_table_service
 from app.env import Env, get_env
 from app.main import create_app
 from app.supabase_client import get_supabase
-from app.tables.sheriff import SheriffUnavailableError
 from app.tables.service import TableNotFoundError, TableService, TableValidationError
+from app.tables.sheriff import SheriffUnavailableError
 
 
 def _env() -> Env:

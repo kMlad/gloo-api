@@ -252,7 +252,9 @@ class PhoneEnrichmentService:
                 lead_id=lead_id,
                 provider="fullenrich",
                 sequence=5,
-                status="pending" if fullenrich_input is not None else "skipped_no_input",
+                status="pending"
+                if fullenrich_input is not None
+                else "skipped_no_input",
                 request_payload=fullenrich_input or {},
             )
             if fullenrich_input is None:
@@ -263,7 +265,7 @@ class PhoneEnrichmentService:
                 await self._complete_without_phone(item_id, had_error)
                 return None
             return item, fullenrich_attempt, fullenrich_input
-        except Exception:
+        except Exception:  # noqa: BLE001 - isolate one enrichment item
             await self._repository.update_item(
                 item_id,
                 {
@@ -364,10 +366,9 @@ class PhoneEnrichmentService:
             attempt = attempts_by_item.get(item_id)
             if attempt is None:
                 continue
-            if (
-                str(custom.get("run_id") or "") != str(attempt["run_id"])
-                or str(custom.get("lead_id") or "") != str(attempt["lead_id"])
-            ):
+            if str(custom.get("run_id") or "") != str(attempt["run_id"]) or str(
+                custom.get("lead_id") or ""
+            ) != str(attempt["lead_id"]):
                 raise InvalidWebhookError("FullEnrich custom identifiers do not match")
             processed_items.add(item_id)
             if attempt["status"] in {"found", "not_found", "failed"}:
@@ -488,7 +489,9 @@ class PhoneEnrichmentService:
         if result.status in {"failed", "rate_limited", "timed_out"}:
             failure_payload = {
                 "id": job_id,
-                "status": "RATE_LIMIT" if result.status == "rate_limited" else "UNKNOWN",
+                "status": "RATE_LIMIT"
+                if result.status == "rate_limited"
+                else "UNKNOWN",
                 "data": [],
             }
             await self._apply_fullenrich_payload(failure_payload)
@@ -566,7 +569,11 @@ class PhoneEnrichmentService:
         }
         active = any(item["status"] in {"running", "waiting"} for item in items)
         if active:
-            status = "waiting" if any(item["status"] == "waiting" for item in items) else "running"
+            status = (
+                "waiting"
+                if any(item["status"] == "waiting" for item in items)
+                else "running"
+            )
         elif counts["failed"] and (
             counts["enriched"] or counts["not_found"] or counts["skipped"]
         ):
@@ -629,7 +636,9 @@ class PhoneEnrichmentService:
     def _company_domain(lead: dict[str, Any]) -> str | None:
         value = lead.get("website") or lead.get("company_url")
         if value:
-            parsed = urlparse(str(value) if "://" in str(value) else "https://" + str(value))
+            parsed = urlparse(
+                str(value) if "://" in str(value) else "https://" + str(value)
+            )
             if parsed.hostname:
                 return parsed.hostname.removeprefix("www.").casefold()
         email = str(lead.get("email") or "")

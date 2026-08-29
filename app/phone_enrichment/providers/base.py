@@ -178,7 +178,9 @@ class BaseProviderClient:
                 error_code, error_message = self._safe_error(payload)
                 if response.status_code >= 400:
                     return ProviderResult(
-                        status="rate_limited" if response.status_code == 429 else "failed",
+                        status="rate_limited"
+                        if response.status_code == 429
+                        else "failed",
                         request_payload=request_payload,
                         response_payload=payload,
                         response_headers=audit_headers,
@@ -241,7 +243,9 @@ class BaseProviderClient:
                 str(item.get("title") or item.get("detail") or fallback),
             )
         code = payload.get("error_code") or payload.get("code")
-        message = payload.get("message") or payload.get("detail") or payload.get("error")
+        message = (
+            payload.get("message") or payload.get("detail") or payload.get("error")
+        )
         return (
             str(code) if code is not None else None,
             str(message) if isinstance(message, (str, int, float)) else fallback,

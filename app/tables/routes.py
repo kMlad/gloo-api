@@ -16,16 +16,10 @@ from fastapi import (
 
 from app.auth import AuthenticatedUser, require_authenticated_user
 from app.dependencies import get_table_service
-from app.tables.email_enrichment import EmailEnrichmentUnavailableError
-from app.tables.sheriff import SheriffUnavailableError
 from app.tables.csv_export import content_disposition_attachment
 from app.tables.csv_import import CsvImportError
+from app.tables.email_enrichment import EmailEnrichmentUnavailableError
 from app.tables.schemas import (
-    SheriffExpandRequest,
-    SheriffExpandResponse,
-    SheriffOptionsResponse,
-    SheriffRunCreate,
-    SheriffRunResponse,
     ColumnCreate,
     ColumnOrderUpdate,
     ColumnResponse,
@@ -34,6 +28,11 @@ from app.tables.schemas import (
     RowListResponse,
     RowResponse,
     RowUpdate,
+    SheriffExpandRequest,
+    SheriffExpandResponse,
+    SheriffOptionsResponse,
+    SheriffRunCreate,
+    SheriffRunResponse,
     TableCreate,
     TableFiltersUpdate,
     TableListResponse,
@@ -46,6 +45,7 @@ from app.tables.service import (
     TableService,
     TableValidationError,
 )
+from app.tables.sheriff import SheriffUnavailableError
 
 router = APIRouter(
     prefix="/api/v1/tables",
@@ -316,9 +316,7 @@ async def get_column_run(
     service: ServiceDependency,
 ) -> dict[str, Any]:
     try:
-        return await service.get_column_run(
-            str(table_id), str(column_id), str(run_id)
-        )
+        return await service.get_column_run(str(table_id), str(column_id), str(run_id))
     except TableNotFoundError as error:
         raise _map_table_error(error) from error
 

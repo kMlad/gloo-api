@@ -3,6 +3,19 @@ from uuid import uuid4
 
 import pytest
 
+from app.tables.schemas import (
+    ColumnCreate,
+    ColumnUpdate,
+    RowCreate,
+    RowUpdate,
+    SheriffConfig,
+    SheriffExpandRequest,
+    SheriffRunCreate,
+    TableCreate,
+    TableFilter,
+    TableFiltersUpdate,
+)
+from app.tables.service import TableNotFoundError, TableService, TableValidationError
 from app.tables.sheriff import SheriffUnavailableError
 from app.tables.sheriff.protocol import (
     PerplexityUsage,
@@ -10,19 +23,6 @@ from app.tables.sheriff.protocol import (
     SheriffOutputField,
     SheriffResearchResult,
 )
-from app.tables.schemas import (
-    SheriffConfig,
-    SheriffExpandRequest,
-    SheriffRunCreate,
-    ColumnCreate,
-    ColumnUpdate,
-    RowCreate,
-    RowUpdate,
-    TableCreate,
-    TableFilter,
-    TableFiltersUpdate,
-)
-from app.tables.service import TableNotFoundError, TableService, TableValidationError
 from tests.test_table_service import FakeTableRepository, _service
 
 
@@ -63,10 +63,15 @@ class FakeSheriffAgent:
                 total_tokens=150,
                 tool_calls_details={"search_web": {"invocation": 1}},
             ),
-            raw={"output": {"first_name": "Ada", "last_name": "Lovelace"}, "usage_cost": 0.01},
+            raw={
+                "output": {"first_name": "Ada", "last_name": "Lovelace"},
+                "usage_cost": 0.01,
+            },
         )
 
-    async def expand(self, *, goal: str, column_names: list[str]) -> SheriffExpandResult:
+    async def expand(
+        self, *, goal: str, column_names: list[str]
+    ) -> SheriffExpandResult:
         self.expand_calls.append({"goal": goal, "column_names": column_names})
         return self.expand_result
 
@@ -174,7 +179,10 @@ async def test_create_sheriff_column_inserts_child_columns() -> None:
         for column in created["columns"]
         if column.get("source_column_id") == parent["id"]
     ]
-    assert {column["source_field"] for column in children} == {"first_name", "last_name"}
+    assert {column["source_field"] for column in children} == {
+        "first_name",
+        "last_name",
+    }
     assert all(column["type"] == "text" for column in children)
     assert all(column.get("id") for column in children)
 
@@ -210,8 +218,14 @@ async def test_run_writes_parent_json_and_child_cells() -> None:
     row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
     created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    first = next(column for column in created["columns"] if column["source_field"] == "first_name")
-    last = next(column for column in created["columns"] if column["source_field"] == "last_name")
+    first = next(
+        column
+        for column in created["columns"]
+        if column["source_field"] == "first_name"
+    )
+    last = next(
+        column for column in created["columns"] if column["source_field"] == "last_name"
+    )
 
     run = await service.start_sheriff_run(
         table["id"],
@@ -425,7 +439,9 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
         created_by=str(uuid4()),
     )
     company_id = table["columns"][0]["id"]
-    first_row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    first_row = await service.add_row(
+        table["id"], RowCreate(values={company_id: "Acme"})
+    )
     second_row = await service.add_row(
         table["id"], RowCreate(values={company_id: "Globex"})
     )
@@ -524,8 +540,12 @@ async def test_run_selected_all_and_overwrite_skip() -> None:
         created_by=str(uuid4()),
     )
     company_id = table["columns"][0]["id"]
-    first_row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
-    second_row = await service.add_row(table["id"], RowCreate(values={company_id: "Globex"}))
+    first_row = await service.add_row(
+        table["id"], RowCreate(values={company_id: "Acme"})
+    )
+    second_row = await service.add_row(
+        table["id"], RowCreate(values={company_id: "Globex"})
+    )
     created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
 
@@ -619,7 +639,11 @@ async def test_delete_parent_removes_children_and_cell_keys() -> None:
     )
     created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    first = next(column for column in created["columns"] if column["source_field"] == "first_name")
+    first = next(
+        column
+        for column in created["columns"]
+        if column["source_field"] == "first_name"
+    )
     run = await service.start_sheriff_run(
         table["id"],
         parent["id"],
@@ -646,7 +670,11 @@ async def test_patch_parent_cell_rejected_child_allowed() -> None:
     row = await service.add_row(table["id"], RowCreate())
     created = await service.add_column(table["id"], _sheriff_payload())
     parent = next(column for column in created["columns"] if column["name"] == "CEO")
-    first = next(column for column in created["columns"] if column["source_field"] == "first_name")
+    first = next(
+        column
+        for column in created["columns"]
+        if column["source_field"] == "first_name"
+    )
     with pytest.raises(TableValidationError, match="cannot be patched"):
         await service.update_row(
             table["id"],

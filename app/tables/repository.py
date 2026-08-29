@@ -1,9 +1,9 @@
 from typing import Any
 
 from postgrest.exceptions import APIError
-from supabase import AsyncClient
 
 from app.utils import chunks, to_iso, utc_now
+from supabase import AsyncClient
 
 _ROW_INSERT_CHUNK = 100
 _ROW_LIST_CHUNK = 1000
@@ -91,9 +91,7 @@ class TableRepository:
         return response.data[0] if response.data else None
 
     async def delete_table(self, table_id: str) -> bool:
-        response = await (
-            self._db.table("tables").delete().eq("id", table_id).execute()
-        )
+        response = await self._db.table("tables").delete().eq("id", table_id).execute()
         return bool(response.data)
 
     async def list_columns(self, table_id: str) -> list[dict[str, Any]]:
@@ -118,11 +116,15 @@ class TableRepository:
         )
         return response.data[0] if response.data else None
 
-    async def insert_columns(self, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def insert_columns(
+        self, columns: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         if not columns:
             return []
         response = await self._db.table("table_columns").insert(columns).execute()
-        return sorted(response.data, key=lambda column: (column["position"], column["id"]))
+        return sorted(
+            response.data, key=lambda column: (column["position"], column["id"])
+        )
 
     async def update_column(
         self,
@@ -147,9 +149,7 @@ class TableRepository:
         )
         return response.data[0] if response.data else None
 
-    async def update_column_positions(
-        self, assignments: list[tuple[str, int]]
-    ) -> None:
+    async def update_column_positions(self, assignments: list[tuple[str, int]]) -> None:
         now = to_iso(utc_now())
         for column_id, position in assignments:
             await (
@@ -254,7 +254,9 @@ class TableRepository:
             return None
         return int(response.data[0]["position"])
 
-    async def replace_row_values(self, updates: list[tuple[str, dict[str, Any]]]) -> None:
+    async def replace_row_values(
+        self, updates: list[tuple[str, dict[str, Any]]]
+    ) -> None:
         now = to_iso(utc_now())
         for row_id, values in updates:
             await (
@@ -341,7 +343,9 @@ class TableRepository:
         response = await self._db.table("perplexity_usage").insert(record).execute()
         return response.data[0]
 
-    async def insert_email_enrichment_run(self, record: dict[str, Any]) -> dict[str, Any]:
+    async def insert_email_enrichment_run(
+        self, record: dict[str, Any]
+    ) -> dict[str, Any]:
         response = await (
             self._db.table("table_email_enrichment_runs").insert(record).execute()
         )
@@ -567,7 +571,9 @@ class TableRepository:
             attempts.extend(response.data)
         return attempts
 
-    async def insert_email_validation_run(self, record: dict[str, Any]) -> dict[str, Any]:
+    async def insert_email_validation_run(
+        self, record: dict[str, Any]
+    ) -> dict[str, Any]:
         response = await (
             self._db.table("table_email_validation_runs").insert(record).execute()
         )

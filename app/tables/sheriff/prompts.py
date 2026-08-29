@@ -130,19 +130,17 @@ def stringify_cell(value: object) -> str:
 
 
 def is_not_found(value: object) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip().casefold() in NOT_FOUND_VALUES:
-        return True
-    return False
+    return value is None or (
+        isinstance(value, str) and value.strip().casefold() in NOT_FOUND_VALUES
+    )
 
 
 def output_json_schema(outputs: list[object]) -> dict[str, object]:
     properties: dict[str, object] = {}
     required: list[str] = []
     for field in outputs:
-        key = getattr(field, "key")
-        field_type = getattr(field, "type")
+        key = field.key
+        field_type = field.type
         if field_type == "boolean":
             properties[key] = {"type": ["boolean", "null"]}
         else:

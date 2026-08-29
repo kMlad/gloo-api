@@ -149,7 +149,9 @@ class FakeEnrichmentRepository:
         return True
 
     async def list_items(self, run_id):
-        return [deepcopy(item) for item in self.items.values() if item["run_id"] == run_id]
+        return [
+            deepcopy(item) for item in self.items.values() if item["run_id"] == run_id
+        ]
 
     async def get_run_detail(self, run_id):
         run = self.runs.get(run_id)
@@ -223,7 +225,9 @@ def _service(repository, calls, leadmagic, prospeo, airscale, fullenrich=None):
 
 
 @pytest.mark.asyncio
-async def test_waterfall_stops_at_first_valid_provider_and_replay_is_idempotent() -> None:
+async def test_waterfall_stops_at_first_valid_provider_and_replay_is_idempotent() -> (
+    None
+):
     lead_id = str(uuid4())
     repository = FakeEnrichmentRepository(
         {
@@ -245,10 +249,10 @@ async def test_waterfall_stops_at_first_valid_provider_and_replay_is_idempotent(
     service = _service(
         repository,
         calls,
-        ProviderResult(status="not_found", request_payload={"email": "pat@example.com"}),
         ProviderResult(
-            status="found", request_payload={}, phone="+1 (415) 555-2671"
+            status="not_found", request_payload={"email": "pat@example.com"}
         ),
+        ProviderResult(status="found", request_payload={}, phone="+1 (415) 555-2671"),
         ProviderResult(status="found", request_payload={}, phone="+442079460958"),
     )
 
@@ -261,9 +265,11 @@ async def test_waterfall_stops_at_first_valid_provider_and_replay_is_idempotent(
     assert repository.lead["enriched_phone_number"] == "+14155552671"
     assert repository.lead["phone_source"] == "prospeo"
     assert calls == ["leadmagic", "prospeo"]
-    assert [
-        attempt["provider"] for attempt in result["items"][0]["attempts"]
-    ] == ["smartlead_signature", "leadmagic", "prospeo"]
+    assert [attempt["provider"] for attempt in result["items"][0]["attempts"]] == [
+        "smartlead_signature",
+        "leadmagic",
+        "prospeo",
+    ]
 
 
 @pytest.mark.asyncio
@@ -357,9 +363,7 @@ async def test_fullenrich_callback_completes_waiting_run_and_is_replay_safe() ->
             external_request_id="job-1",
         ),
     )
-    service = _service(
-        repository, calls, no_result, no_result, no_result, fullenrich
-    )
+    service = _service(repository, calls, no_result, no_result, no_result, fullenrich)
 
     waiting = await service.run(
         PhoneEnrichmentRequest(lead_ids=[lead_id]), "idempotency-key-3"
@@ -377,9 +381,7 @@ async def test_fullenrich_callback_completes_waiting_run_and_is_replay_safe() ->
                     "item_id": item["id"],
                     "lead_id": lead_id,
                 },
-                "contact_info": {
-                    "most_probable_phone": {"number": "+1 415 555 2671"}
-                },
+                "contact_info": {"most_probable_phone": {"number": "+1 415 555 2671"}},
             }
         ],
     }

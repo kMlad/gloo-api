@@ -7,7 +7,9 @@ from app.phone_enrichment.providers.linkedin import person_linkedin_url
 
 
 class AirScaleClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 
@@ -23,8 +25,10 @@ class AirScaleClient(BaseProviderClient):
             headers={"Authorization": f"Bearer {self._api_key}"},
         )
         response = result.response_payload
-        if result.http_status is not None and result.http_status < 400 and isinstance(
-            response, dict
+        if (
+            result.http_status is not None
+            and result.http_status < 400
+            and isinstance(response, dict)
         ):
             phones = response.get("phone_numbers")
             if isinstance(phones, str) and phones:

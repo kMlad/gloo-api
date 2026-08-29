@@ -4,11 +4,11 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from supabase import AsyncClient, AuthApiError, AuthError
 
 from app.env import Env, get_env
 from app.models import AppRole
 from app.supabase_client import get_supabase
+from supabase import AsyncClient, AuthApiError, AuthError
 
 bearer_scheme = HTTPBearer(auto_error=False)
 

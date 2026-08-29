@@ -257,9 +257,7 @@ def test_search_sources_includes_fetch_url_results() -> None:
 
 
 def test_sheriff_source_coerces_null_title() -> None:
-    source = SheriffSource.model_validate(
-        {"url": "https://example.com", "title": None}
-    )
+    source = SheriffSource.model_validate({"url": "https://example.com", "title": None})
     assert source.title == ""
 
 

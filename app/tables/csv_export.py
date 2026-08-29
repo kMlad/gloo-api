@@ -52,7 +52,4 @@ def content_disposition_attachment(filename: str) -> str:
         filename.encode("ascii", "ignore").decode("ascii").replace('"', "").strip()
         or "table.csv"
     )
-    return (
-        f'attachment; filename="{ascii_name}"; '
-        f"filename*=UTF-8''{quote(filename)}"
-    )
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"

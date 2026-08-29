@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError
 
+from app.tables.csv_export import csv_filename, format_csv_cell, render_csv
+from app.tables.csv_import import parse_csv, table_name_from_filename
 from app.tables.email_enrichment import (
     EmailEnrichmentUnavailableError,
     EmailFinder,
@@ -25,13 +27,31 @@ from app.tables.email_enrichment.protocol import (
     WaterfallStep,
     WaterfallStepEmail,
 )
+from app.tables.repository import TableRepository, is_unique_violation
+from app.tables.schemas import (
+    COMPUTED_COLUMN_TYPES,
+    ColumnCreate,
+    ColumnUpdate,
+    EmailEnrichmentConfig,
+    EmailValidationConfig,
+    RowCreate,
+    RowUpdate,
+    SheriffConfig,
+    SheriffExpandRequest,
+    SheriffOutputField,
+    SheriffRunCreate,
+    TableCreate,
+    TableFilter,
+    TableFiltersUpdate,
+    TableUpdate,
+)
 from app.tables.sheriff import (
     DEFAULT_SHERIFF_MODEL,
     SHERIFF_MODELS,
+    InvalidPlaceholderError,
     PerplexityUsage,
     SheriffAgent,
     SheriffUnavailableError,
-    InvalidPlaceholderError,
     UnknownPlaceholderError,
 )
 from app.tables.sheriff.prompts import (
@@ -40,26 +60,6 @@ from app.tables.sheriff.prompts import (
     placeholder_names,
     stringify_cell,
     unique_child_name,
-)
-from app.tables.csv_export import csv_filename, format_csv_cell, render_csv
-from app.tables.csv_import import parse_csv, table_name_from_filename
-from app.tables.repository import TableRepository, is_unique_violation
-from app.tables.schemas import (
-    COMPUTED_COLUMN_TYPES,
-    EmailEnrichmentConfig,
-    EmailValidationConfig,
-    SheriffConfig,
-    SheriffExpandRequest,
-    SheriffOutputField,
-    SheriffRunCreate,
-    ColumnCreate,
-    ColumnUpdate,
-    RowCreate,
-    RowUpdate,
-    TableCreate,
-    TableFilter,
-    TableFiltersUpdate,
-    TableUpdate,
 )
 from app.utils import to_iso, utc_now
 
@@ -109,7 +109,9 @@ class TableService:
         items = await self._repository.list_tables()
         return {"items": items}
 
-    async def create_table(self, payload: TableCreate, created_by: str) -> dict[str, Any]:
+    async def create_table(
+        self, payload: TableCreate, created_by: str
+    ) -> dict[str, Any]:
         table = await self._repository.create_table(
             name=payload.name, created_by=created_by
         )
@@ -269,9 +271,7 @@ class TableService:
             validation_config = _resolve_email_validation_patch(
                 payload.email_validation, column.get("config")
             )
-            _validate_email_validation_column(
-                validation_config, columns, column_id
-            )
+            _validate_email_validation_column(validation_config, columns, column_id)
             config = _email_validation_config_record(validation_config)
         try:
             updated = await self._repository.update_column(
@@ -463,9 +463,7 @@ class TableService:
         result = await agent.expand(
             goal=payload.goal,
             column_names=[
-                str(column["name"])
-                for column in columns
-                if column["type"] != "sheriff"
+                str(column["name"]) for column in columns if column["type"] != "sheriff"
             ],
         )
         await self._record_perplexity_usage(
@@ -478,8 +476,7 @@ class TableService:
             "enhanced_prompt": result.enhanced_prompt,
             "outputs": [field.model_dump() for field in result.outputs],
             "input_columns": [
-                {"id": column["id"], "name": column["name"]}
-                for column in input_columns
+                {"id": column["id"], "name": column["name"]} for column in input_columns
             ],
         }
 
@@ -616,7 +613,7 @@ class TableService:
                     )
 
             await asyncio.gather(*(process(item) for item in items))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate sheriff run failures
             await self._fail_open_run_items(
                 run_id,
                 str(error),
@@ -732,7 +729,9 @@ class TableService:
             return
         table_id = str(run["table_id"])
         column_id = str(run["column_id"])
-        await self._repository.update_email_enrichment_run(run_id, {"status": "running"})
+        await self._repository.update_email_enrichment_run(
+            run_id, {"status": "running"}
+        )
         try:
             columns = await self._require_columns(table_id)
             column = _column_by_id(columns, column_id)
@@ -769,7 +768,7 @@ class TableService:
             pending = [result for result in results if result is not None]
             if pending:
                 await self._submit_fullenrich_email_batches(run_id, pending)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate email enrichment run
             await self._fail_open_email_run_items(
                 run_id,
                 str(error),
@@ -892,7 +891,9 @@ class TableService:
             return
         table_id = str(run["table_id"])
         column_id = str(run["column_id"])
-        await self._repository.update_email_validation_run(run_id, {"status": "running"})
+        await self._repository.update_email_validation_run(
+            run_id, {"status": "running"}
+        )
         try:
             columns = await self._require_columns(table_id)
             column = _column_by_id(columns, column_id)
@@ -925,7 +926,7 @@ class TableService:
                     )
 
             await asyncio.gather(*(process(item) for item in items))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate email validation run
             await self._fail_open_email_validation_run_items(
                 run_id,
                 str(error),
@@ -954,9 +955,7 @@ class TableService:
 
     def _require_email_validator(self) -> EmailValidator:
         if self._email_validator is None:
-            raise EmailEnrichmentUnavailableError(
-                "MillionVerifier is not configured"
-            )
+            raise EmailEnrichmentUnavailableError("MillionVerifier is not configured")
         return self._email_validator
 
     async def _add_email_enrichment_column(
@@ -1102,7 +1101,7 @@ class TableService:
             return
         try:
             verification = await validator.verify(email)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate one validation row
             values[column_id] = _email_validation_cell(
                 status="failed", email=email, error=str(error)
             )
@@ -1285,8 +1284,7 @@ class TableService:
             return
         try:
             defer_fullenrich = (
-                self._fullenrich_email is not None
-                and "fullenrich" in config.providers
+                self._fullenrich_email is not None and "fullenrich" in config.providers
             )
             providers = (
                 [provider for provider in config.providers if provider != "fullenrich"]
@@ -1301,7 +1299,7 @@ class TableService:
                 rejected_emails=rejected,
                 accept_catchall=config.accept_catchall and not defer_fullenrich,
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate one enrichment row
             values[column_id] = _email_enrichment_cell(
                 status="failed", rejected_emails=rejected, error=str(error)
             )
@@ -1317,9 +1315,9 @@ class TableService:
                 item_id=item_id,
                 attempts=outcome.attempts,
             )
-            sequence = max(
-                (attempt.sequence for attempt in outcome.attempts), default=0
-            ) + 1
+            sequence = (
+                max((attempt.sequence for attempt in outcome.attempts), default=0) + 1
+            )
             assert self._fullenrich_email is not None
             contact = self._fullenrich_email.contact(
                 inputs,
@@ -1422,9 +1420,7 @@ class TableService:
                         "error_message": None if waiting else result.error_message,
                     },
                 )
-                row = await self._repository.get_row(
-                    table_id, entry["row_id"]
-                )
+                row = await self._repository.get_row(table_id, entry["row_id"])
                 if row is None:
                     continue
                 values = dict(row.get("values") or {})
@@ -1436,9 +1432,7 @@ class TableService:
                     "status": item_status,
                     "error": None if waiting else result.error_message,
                 }
-                await self._repository.replace_row_values(
-                    [(entry["row_id"], values)]
-                )
+                await self._repository.replace_row_values([(entry["row_id"], values)])
 
     async def process_fullenrich_email_webhook(
         self, raw_body: bytes, signature: str
@@ -1479,10 +1473,8 @@ class TableService:
         external_id = payload.get("id") or payload.get("enrichment_id")
         if external_id is None or provider_status == "IN_PROGRESS":
             return
-        attempts = (
-            await self._repository.list_email_enrichment_attempts_by_external_id(
-                str(external_id)
-            )
+        attempts = await self._repository.list_email_enrichment_attempts_by_external_id(
+            str(external_id)
         )
         terminal_failure = provider_status in {
             "CANCELED",
@@ -1534,7 +1526,9 @@ class TableService:
             return
         values = dict(row.get("values") or {})
         cell = values.get(column_id)
-        cell = cell if isinstance(cell, dict) else _email_enrichment_cell(status="running")
+        cell = (
+            cell if isinstance(cell, dict) else _email_enrichment_cell(status="running")
+        )
         if terminal_error is not None:
             await self._repository.update_email_enrichment_attempt(
                 str(attempt["id"]),
@@ -1632,8 +1626,7 @@ class TableService:
             )
             if hard_error:
                 validation_error = (
-                    verification.error_message
-                    or "MillionVerifier verification failed"
+                    verification.error_message or "MillionVerifier verification failed"
                 )
                 break
             if valid:
@@ -1730,13 +1723,13 @@ class TableService:
             return
         run_ids = [str(run["id"]) for run in runs]
         items = await self._repository.list_email_enrichment_run_items_for_runs(run_ids)
-        attempts = await self._repository.list_email_enrichment_catchall_attempts(run_ids)
+        attempts = await self._repository.list_email_enrichment_catchall_attempts(
+            run_ids
+        )
         if not attempts:
             return
         item_row = {str(item["id"]): str(item["row_id"]) for item in items}
-        run_created = {
-            str(run["id"]): str(run.get("created_at") or "") for run in runs
-        }
+        run_created = {str(run["id"]): str(run.get("created_at") or "") for run in runs}
         by_row: dict[str, list[dict[str, Any]]] = {}
         for attempt in attempts:
             row_id = item_row.get(str(attempt.get("item_id") or ""))
@@ -1860,9 +1853,7 @@ class TableService:
         skipped = sum(1 for item in items if item["status"] == "skipped")
         not_found = sum(1 for item in items if item["status"] == "not_found")
         waiting = sum(1 for item in items if item["status"] == "waiting")
-        running = sum(
-            1 for item in items if item["status"] in {"queued", "running"}
-        )
+        running = sum(1 for item in items if item["status"] in {"queued", "running"})
         completed_at: str | None
         if running:
             status = "running"
@@ -2068,7 +2059,7 @@ class TableService:
                 {"status": "failed", "error_message": str(error)},
             )
             return
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - isolate one sheriff row
             values[column_id] = _sheriff_cell(status="failed", error=str(error))
             await self._repository.replace_row_values([(row_id, values)])
             await self._repository.update_sheriff_run_item(
@@ -2076,7 +2067,9 @@ class TableService:
                 {"status": "failed", "error_message": str(error)},
             )
             return
-        output, values = _apply_research_output(values, children, outputs, result.output)
+        output, values = _apply_research_output(
+            values, children, outputs, result.output
+        )
         values[column_id] = _sheriff_cell(
             status="succeeded",
             confidence=result.confidence,
@@ -2244,9 +2237,7 @@ def _column_response(column: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _row_response(
-    row: dict[str, Any], columns: list[dict[str, Any]]
-) -> dict[str, Any]:
+def _row_response(row: dict[str, Any], columns: list[dict[str, Any]]) -> dict[str, Any]:
     stored = dict(row.get("values") or {})
     values: dict[str, Any] = {}
     for column in columns:
@@ -2290,7 +2281,9 @@ def _validate_filters(
                 f"{column_type} columns only support is_empty and is_not_empty filters"
             )
         if item.operator == "contains" and column_type != "text":
-            raise TableValidationError("contains filters can only be used on text columns")
+            raise TableValidationError(
+                "contains filters can only be used on text columns"
+            )
         if item.operator == "eq":
             if column_type == "text" and not isinstance(item.value, str):
                 raise TableValidationError("text eq filters require a string value")
@@ -2354,9 +2347,7 @@ def _sort_rows(
     reverse = sort_direction == "desc"
 
     def sort_key(row: dict[str, Any]) -> tuple[str, int, str]:
-        cell = format_csv_cell(
-            column["type"], (row.get("values") or {}).get(column_id)
-        )
+        cell = format_csv_cell(column["type"], (row.get("values") or {}).get(column_id))
         return (cell.casefold(), int(row.get("position") or 0), str(row["id"]))
 
     return sorted(rows, key=sort_key, reverse=reverse)
@@ -2633,17 +2624,13 @@ def _email_steps_from_cell(cell: dict[str, Any]) -> list[WaterfallStep]:
                 email=str(item["email"]), validation=str(item["validation"])
             )
             for item in raw_step.get("emails") or []
-            if isinstance(item, dict)
-            and item.get("email")
-            and item.get("validation")
+            if isinstance(item, dict) and item.get("email") and item.get("validation")
         ]
         steps.append(WaterfallStep(provider=provider, status=status, emails=emails))
     return steps
 
 
-def _provider_for_email_steps(
-    steps: list[WaterfallStep], email: str
-) -> str | None:
+def _provider_for_email_steps(steps: list[WaterfallStep], email: str) -> str | None:
     for step in steps:
         if any(item.email == email for item in step.emails):
             return step.provider
@@ -2661,9 +2648,7 @@ def _mark_step_email_valid(steps: list[WaterfallStep], email: str) -> None:
 def _promote_catchall_cell(
     cell: dict[str, Any], *, email: str, provider: str
 ) -> dict[str, Any]:
-    rejected = [
-        item for item in (cell.get("rejected_emails") or []) if item != email
-    ]
+    rejected = [item for item in (cell.get("rejected_emails") or []) if item != email]
     steps: list[dict[str, Any]] = []
     marked = False
     for step in cell.get("steps") or []:
@@ -2742,7 +2727,13 @@ def _email_inputs_from_row(
     company_name = cell_text(values.get(str(config.company_name_column_id)))
     domain_raw = values.get(str(config.company_domain_column_id))
     domain = normalize_domain(domain_raw)
-    if not first_name or not last_name or not linkedin_raw or not company_name or not domain:
+    if (
+        not first_name
+        or not last_name
+        or not linkedin_raw
+        or not company_name
+        or not domain
+    ):
         return None
     return EmailInputs(
         first_name=first_name,

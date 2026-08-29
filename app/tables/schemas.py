@@ -4,7 +4,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.tables.email_enrichment.protocol import DEFAULT_EMAIL_PROVIDERS, EMAIL_PROVIDERS
+from app.tables.email_enrichment.protocol import (
+    DEFAULT_EMAIL_PROVIDERS,
+    EMAIL_PROVIDERS,
+)
 from app.tables.sheriff.protocol import (
     DEFAULT_SHERIFF_MODEL,
     SHERIFF_MODELS,
@@ -48,7 +51,7 @@ class TableFilter(BaseModel):
         if self.value is None or isinstance(self.value, (dict, list)):
             raise ValueError("eq filters require a string or boolean value")
         if not isinstance(self.value, (str, bool)):
-            raise ValueError("eq filters require a string or boolean value")
+            raise TypeError("eq filters require a string or boolean value")
         return self
 
 
@@ -92,7 +95,9 @@ class SheriffConfig(BaseModel):
 
 
 class EmailEnrichmentConfig(BaseModel):
-    providers: list[EmailProvider] = Field(default_factory=lambda: list(DEFAULT_EMAIL_PROVIDERS))
+    providers: list[EmailProvider] = Field(
+        default_factory=lambda: list(DEFAULT_EMAIL_PROVIDERS)
+    )
     validator: EmailValidatorName = "millionverifier"
     accept_catchall: bool = False
     first_name_column_id: UUID

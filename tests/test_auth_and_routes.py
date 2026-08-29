@@ -79,9 +79,7 @@ class CampaignRepositoryStub:
     def __init__(self) -> None:
         self.campaign = None
 
-    async def upsert_campaign(
-        self, campaign_id, name, enabled, reply_types
-    ):
+    async def upsert_campaign(self, campaign_id, name, enabled, reply_types):
         now = datetime.now(UTC).isoformat()
         self.campaign = {
             "smartlead_campaign_id": campaign_id,
@@ -94,7 +92,10 @@ class CampaignRepositoryStub:
         return self.campaign
 
     async def update_campaign(self, campaign_id, *, enabled, reply_types):
-        if self.campaign is None or self.campaign["smartlead_campaign_id"] != campaign_id:
+        if (
+            self.campaign is None
+            or self.campaign["smartlead_campaign_id"] != campaign_id
+        ):
             return None
         if enabled is not None:
             self.campaign["enabled"] = enabled
@@ -186,11 +187,11 @@ async def test_phone_enrichment_route_requires_auth_and_idempotency_key() -> Non
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver"
     ) as client:
-        assert (await client.post("/api/v1/phone-enrichments", json={})).status_code == 401
         assert (
-            await client.post(
-                "/api/v1/phone-enrichments", headers=headers, json={}
-            )
+            await client.post("/api/v1/phone-enrichments", json={})
+        ).status_code == 401
+        assert (
+            await client.post("/api/v1/phone-enrichments", headers=headers, json={})
         ).status_code == 422
         response = await client.post(
             "/api/v1/phone-enrichments",

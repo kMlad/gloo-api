@@ -45,7 +45,9 @@ async def run_waterfall(
                     request_payload={},
                 )
             )
-            steps.append(WaterfallStep(provider=provider, status="skipped_not_configured"))
+            steps.append(
+                WaterfallStep(provider=provider, status="skipped_not_configured")
+            )
             continue
         result = await finder.find_email(inputs)
         emails = [email for value in result.emails if (email := normalize_email(value))]
@@ -54,7 +56,9 @@ async def run_waterfall(
             finder_status = "found"
         elif finder_status not in _HARD_ERRORS and finder_status != "skipped_no_input":
             finder_status = "not_found"
-        attempts.append(_finder_attempt(provider, sequence, result, finder_status, emails))
+        attempts.append(
+            _finder_attempt(provider, sequence, result, finder_status, emails)
+        )
         step = WaterfallStep(provider=provider, status=finder_status)
         if finder_status in _HARD_ERRORS:
             hard_errors += 1
@@ -77,14 +81,14 @@ async def run_waterfall(
                         email_candidate=email,
                     )
                 )
-                step.emails.append(WaterfallStepEmail(email=email, validation="skipped"))
+                step.emails.append(
+                    WaterfallStepEmail(email=email, validation="skipped")
+                )
                 continue
             sequence += 1
             verification = await validator.verify(email)
             valid = _is_ok(verification)
-            attempts.append(
-                _validator_attempt(sequence, email, verification, valid)
-            )
+            attempts.append(_validator_attempt(sequence, email, verification, valid))
             step.emails.append(
                 WaterfallStepEmail(
                     email=email,
@@ -131,9 +135,7 @@ async def run_waterfall(
             email=fallback_email,
             provider=fallback_provider,
             validation_result="catch_all",
-            rejected_emails=[
-                item for item in rejected_order if item != fallback_email
-            ],
+            rejected_emails=[item for item in rejected_order if item != fallback_email],
             attempts=attempts,
             steps=steps,
         )

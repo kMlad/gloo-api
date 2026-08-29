@@ -7,7 +7,9 @@ from app.tables.email_enrichment.protocol import ValidationResult
 
 
 class MillionVerifierClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 
@@ -31,10 +33,7 @@ class MillionVerifierClient(BaseProviderClient):
             and error_code is None
         ):
             status = "ok" if verification == "ok" else "invalid"
-        elif (
-            result.http_status is not None
-            and 300 <= result.http_status < 400
-        ):
+        elif result.http_status is not None and 300 <= result.http_status < 400:
             status = "failed"
             error_code = "unexpected_redirect"
             error_message = "Provider returned an unexpected redirect"

@@ -9,7 +9,9 @@ from app.tables.email_enrichment.providers.base import to_find_result
 
 
 class LeadMagicEmailClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 

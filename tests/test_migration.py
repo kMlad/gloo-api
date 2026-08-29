@@ -15,7 +15,10 @@ def test_migration_enables_rls_and_only_grants_service_role() -> None:
 
     for table in tables:
         assert f"alter table public.{table} enable row level security" in migration
-        assert f"revoke all on table public.{table} from public, anon, authenticated" in migration
+        assert (
+            f"revoke all on table public.{table} from public, anon, authenticated"
+            in migration
+        )
         assert (
             f"grant select, insert, update, delete on table public.{table} to service_role"
             in migration
@@ -36,7 +39,10 @@ def test_phone_enrichment_migration_is_private_and_idempotent() -> None:
     ]
     for table in tables:
         assert f"alter table public.{table} enable row level security" in migration
-        assert f"revoke all on table public.{table} from public, anon, authenticated" in migration
+        assert (
+            f"revoke all on table public.{table} from public, anon, authenticated"
+            in migration
+        )
         assert f"revoke all on table public.{table} from service_role" in migration
         assert (
             f"grant select, insert, update, delete on table public.{table} to service_role"
@@ -119,12 +125,10 @@ def test_claygent_queued_status_migration_widens_run_checks() -> None:
     assert "table_claygent_runs_status_check" in migration
     assert "table_claygent_run_items_status_check" in migration
     assert (
-        "status in ('queued', 'running', 'succeeded', 'partial', 'failed')"
-        in migration
+        "status in ('queued', 'running', 'succeeded', 'partial', 'failed')" in migration
     )
     assert (
-        "status in ('queued', 'running', 'succeeded', 'failed', 'skipped')"
-        in migration
+        "status in ('queued', 'running', 'succeeded', 'failed', 'skipped')" in migration
     )
 
 
@@ -147,7 +151,10 @@ def test_perplexity_usage_migration_is_private_and_split() -> None:
         Path("supabase/migrations").glob("*_perplexity_usage.sql")
     ).read_text()
     assert "create table public.perplexity_usage" in migration
-    assert "operation text not null check (operation in ('expand', 'research'))" in migration
+    assert (
+        "operation text not null check (operation in ('expand', 'research'))"
+        in migration
+    )
     assert "model_cost numeric(12, 8)" in migration
     assert "tool_calls_cost numeric(12, 8)" in migration
     assert "total_cost numeric(12, 8)" in migration
@@ -173,7 +180,10 @@ def test_email_enrichment_columns_migration_is_private_and_typed() -> None:
     migration = next(
         Path("supabase/migrations").glob("*_email_enrichment_columns.sql")
     ).read_text()
-    assert "check (type in ('text', 'boolean', 'sheriff', 'email_enrichment'))" in migration
+    assert (
+        "check (type in ('text', 'boolean', 'sheriff', 'email_enrichment'))"
+        in migration
+    )
     assert "table_columns_computed_config_check" in migration
     assert "type in ('sheriff', 'email_enrichment')" in migration
     tables = [
@@ -205,8 +215,7 @@ def test_email_validation_columns_migration_is_private_and_typed() -> None:
     ).read_text()
     assert (
         "check (type in ('text', 'boolean', 'sheriff', 'email_enrichment', "
-        "'email_validation'))"
-        in migration
+        "'email_validation'))" in migration
     )
     assert "table_columns_computed_config_check" in migration
     assert "type in ('sheriff', 'email_enrichment', 'email_validation')" in migration

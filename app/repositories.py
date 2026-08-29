@@ -2,9 +2,9 @@ from datetime import timedelta
 from typing import Any
 
 from postgrest.exceptions import APIError
-from supabase import AsyncClient
 
 from app.utils import chunks, merge_non_empty, parse_datetime, to_iso, utc_now
+from supabase import AsyncClient
 
 
 class ConcurrentImportError(Exception):
@@ -15,14 +15,18 @@ class Repository:
     def __init__(self, supabase: AsyncClient) -> None:
         self._db = supabase
 
-    async def list_campaigns(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+    async def list_campaigns(
+        self, *, enabled_only: bool = False
+    ) -> list[dict[str, Any]]:
         query = self._db.table("smartlead_campaigns").select("*")
         if enabled_only:
             query = query.eq("enabled", True)
         response = await query.order("smartlead_campaign_id").execute()
         return response.data
 
-    async def get_campaigns_by_ids(self, campaign_ids: list[int]) -> list[dict[str, Any]]:
+    async def get_campaigns_by_ids(
+        self, campaign_ids: list[int]
+    ) -> list[dict[str, Any]]:
         if not campaign_ids:
             return []
         response = await (
@@ -126,7 +130,9 @@ class Repository:
             raise
         return response.data[0]
 
-    async def update_import_run(self, run_id: str, values: dict[str, Any]) -> dict[str, Any]:
+    async def update_import_run(
+        self, run_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
         values = {**values, "updated_at": to_iso(utc_now())}
         response = await (
             self._db.table("smartlead_import_runs")
@@ -184,7 +190,9 @@ class Repository:
         )
         if incoming_is_newer:
             merged_properties = merge_non_empty(existing["properties"], properties)
-            merged_custom = merge_non_empty(existing["custom_properties"], custom_properties)
+            merged_custom = merge_non_empty(
+                existing["custom_properties"], custom_properties
+            )
             typed_update = {
                 key: value
                 for key, value in typed_properties.items()
@@ -194,7 +202,9 @@ class Repository:
             source_observed_at = observed_at
         else:
             merged_properties = merge_non_empty(properties, existing["properties"])
-            merged_custom = merge_non_empty(custom_properties, existing["custom_properties"])
+            merged_custom = merge_non_empty(
+                custom_properties, existing["custom_properties"]
+            )
             typed_update = {}
             email_update = existing["email"]
             source_observed_at = existing["source_observed_at"]
@@ -362,8 +372,12 @@ class Repository:
 
         replies_by_conversation: dict[str, list[dict[str, Any]]] = {}
         for reply in replies:
-            replies_by_conversation.setdefault(reply["conversation_id"], []).append(reply)
+            replies_by_conversation.setdefault(reply["conversation_id"], []).append(
+                reply
+            )
         for conversation in conversations:
-            conversation["replies"] = replies_by_conversation.get(conversation["id"], [])
+            conversation["replies"] = replies_by_conversation.get(
+                conversation["id"], []
+            )
 
         return {"lead": lead_response.data[0], "conversations": conversations}

@@ -166,10 +166,12 @@ class ImportService:
             inbox_items: list[dict[str, Any]] = []
             inbox_errors: list[dict[str, Any]] = []
             for grouped_campaign_ids, category_ids in campaign_groups:
-                group_by_map, group_by_email, group_detail_errors = (
-                    await self._fetch_campaign_lead_details(
-                        grouped_campaign_ids, category_ids
-                    )
+                (
+                    group_by_map,
+                    group_by_email,
+                    group_detail_errors,
+                ) = await self._fetch_campaign_lead_details(
+                    grouped_campaign_ids, category_ids
                 )
                 group_items, group_inbox_errors = await self._fetch_inbox_items(
                     grouped_campaign_ids, category_ids, request
@@ -197,7 +199,7 @@ class ImportService:
                         detail_by_email,
                         category_type_by_id,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate one conversation
                     errors.append(
                         {
                             "scope": "conversation",
@@ -457,8 +459,7 @@ class ImportService:
                         not messages
                         or len(messages) < 20
                         or (
-                            reported_total is not None
-                            and offset >= int(reported_total)
+                            reported_total is not None and offset >= int(reported_total)
                         )
                     ):
                         break
@@ -504,7 +505,11 @@ class ImportService:
                     for record in records:
                         if not isinstance(record, dict):
                             continue
-                        lead = record.get("lead") if isinstance(record.get("lead"), dict) else record
+                        lead = (
+                            record.get("lead")
+                            if isinstance(record.get("lead"), dict)
+                            else record
+                        )
                         map_id = record.get("campaign_lead_map_id") or lead.get(
                             "campaign_lead_map_id"
                         )
@@ -544,7 +549,9 @@ class ImportService:
             else detail_record
         )
         lead_properties = merge_non_empty(inbox_lead, detailed_lead)
-        email = str(lead_properties.get("email") or inbox_lead.get("email") or "").strip()
+        email = str(
+            lead_properties.get("email") or inbox_lead.get("email") or ""
+        ).strip()
         email_normalized = normalize_email(email)
         if not email_normalized or "@" not in email_normalized:
             raise ValueError("Inbox item has no valid lead email")
@@ -556,7 +563,9 @@ class ImportService:
         inbound_messages = self._inbound_messages(item)
         if not inbound_messages:
             raise ValueError("Qualifying conversation contains no inbound messages")
-        received_times = [self._message_received_at(message) for message in inbound_messages]
+        received_times = [
+            self._message_received_at(message) for message in inbound_messages
+        ]
         observed_at = max(received_times)
         qualified_at = min(received_times)
 
@@ -566,9 +575,7 @@ class ImportService:
             "smartlead_phone_number": first_present(
                 lead_properties, ["phone_number", "phone"]
             ),
-            "company_name": first_present(
-                lead_properties, ["company_name", "company"]
-            ),
+            "company_name": first_present(lead_properties, ["company_name", "company"]),
             "location": lead_properties.get("location"),
             "website": lead_properties.get("website"),
             "company_url": first_present(
@@ -589,7 +596,9 @@ class ImportService:
 
         if not map_id:
             map_id = f"fallback:{campaign_id}:{email_normalized}"
-        category = item.get("category") if isinstance(item.get("category"), dict) else {}
+        category = (
+            item.get("category") if isinstance(item.get("category"), dict) else {}
+        )
         category_id = category.get("id") or item.get("lead_category_id")
         category_name = category.get("name") or item.get("category_name")
         try:

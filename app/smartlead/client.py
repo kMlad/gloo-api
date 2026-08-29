@@ -65,7 +65,9 @@ class SmartLeadClient:
             if retryable and attempt < self._max_retries:
                 retry_after = response.headers.get("Retry-After")
                 try:
-                    delay = float(retry_after) if retry_after is not None else 2**attempt
+                    delay = (
+                        float(retry_after) if retry_after is not None else 2**attempt
+                    )
                 except ValueError:
                     delay = 2**attempt
                 await self._sleep(min(max(delay, 0), 60))

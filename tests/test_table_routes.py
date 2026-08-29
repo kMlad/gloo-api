@@ -5,7 +5,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
-from supabase import AuthApiError
 from supabase_auth.types import User, UserResponse
 
 from app.dependencies import get_table_service
@@ -15,6 +14,7 @@ from app.models import AppRole
 from app.supabase_client import get_supabase
 from app.tables.schemas import TableFilter
 from app.tables.service import TableService
+from supabase import AuthApiError
 
 
 def _env() -> Env:
@@ -50,7 +50,9 @@ def _user(*, role: AppRole | None = "sdr") -> User:
 
 
 class AuthStub:
-    def __init__(self, *, current_user: User | None, get_user_error: AuthApiError | None = None) -> None:
+    def __init__(
+        self, *, current_user: User | None, get_user_error: AuthApiError | None = None
+    ) -> None:
         self.current_user = current_user
         self.get_user_error = get_user_error
 
@@ -130,11 +132,15 @@ def test_table_filter_schema_validates_operators() -> None:
     column_id = uuid4()
     assert TableFilter(column_id=column_id, operator="is_empty").value is None
     assert TableFilter(column_id=column_id, operator="is_not_empty").value is None
-    assert TableFilter(
-        column_id=column_id, operator="contains", value="acme"
-    ).operator == "contains"
+    assert (
+        TableFilter(column_id=column_id, operator="contains", value="acme").operator
+        == "contains"
+    )
     assert TableFilter(column_id=column_id, operator="eq", value=True).value is True
-    assert TableFilter(column_id=column_id, operator="contains", value="Yes").logic == "and"
+    assert (
+        TableFilter(column_id=column_id, operator="contains", value="Yes").logic
+        == "and"
+    )
     assert (
         TableFilter(
             column_id=column_id, operator="contains", value="Unclear", logic="or"

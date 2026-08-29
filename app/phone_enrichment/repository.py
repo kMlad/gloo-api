@@ -2,9 +2,9 @@ from datetime import timedelta
 from typing import Any
 
 from postgrest.exceptions import APIError
-from supabase import AsyncClient
 
 from app.utils import parse_datetime, to_iso, utc_now
+from supabase import AsyncClient
 
 
 class ActiveLeadEnrichmentError(Exception):
@@ -191,9 +191,7 @@ class EnrichmentRepository:
             raise
         return response.data[0]
 
-    async def update_item(
-        self, item_id: str, values: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def update_item(self, item_id: str, values: dict[str, Any]) -> dict[str, Any]:
         response = await (
             self._db.table("phone_enrichment_items")
             .update({**values, "updated_at": to_iso(utc_now())})
@@ -319,22 +317,21 @@ class EnrichmentRepository:
         )
         return response.data
 
-    async def acquire_reconciliation(
-        self, run_id: str, minimum_seconds: int
-    ) -> bool:
+    async def acquire_reconciliation(self, run_id: str, minimum_seconds: int) -> bool:
         run = await self.get_run(run_id)
         if run is None:
             return False
         last_value = run.get("last_reconciled_at")
-        if last_value is not None:
-            if parse_datetime(str(last_value)) > utc_now() - timedelta(
-                seconds=minimum_seconds
-            ):
-                return False
+        if last_value is not None and parse_datetime(
+            str(last_value)
+        ) > utc_now() - timedelta(seconds=minimum_seconds):
+            return False
         now = to_iso(utc_now())
-        query = self._db.table("phone_enrichment_runs").update(
-            {"last_reconciled_at": now, "updated_at": now}
-        ).eq("id", run_id)
+        query = (
+            self._db.table("phone_enrichment_runs")
+            .update({"last_reconciled_at": now, "updated_at": now})
+            .eq("id", run_id)
+        )
         if last_value is None:
             query = query.is_("last_reconciled_at", "null")
         else:

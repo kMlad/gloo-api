@@ -20,6 +20,7 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.5",
 ]
 
 [build-system]
@@ -32,3 +33,12 @@ module-root = ""
 
 [tool.fastapi]
 entrypoint = "app.main:app"
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+]

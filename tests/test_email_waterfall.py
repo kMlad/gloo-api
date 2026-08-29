@@ -97,7 +97,9 @@ async def test_waterfall_caches_invalid_email_and_skips_millionverifier() -> Non
     assert outcome.provider == "fullenrich"
     assert outcome.rejected_emails == ["bad@acme.com"]
     assert validator.calls == ["bad@acme.com", "ada@acme.com"]
-    cached = [attempt for attempt in outcome.attempts if attempt.status == "skipped_cached"]
+    cached = [
+        attempt for attempt in outcome.attempts if attempt.status == "skipped_cached"
+    ]
     assert len(cached) == 1
     assert cached[0].provider == "millionverifier"
     assert [step.as_dict() for step in outcome.steps] == [

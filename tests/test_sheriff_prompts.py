@@ -3,6 +3,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.tables.schemas import (
+    ColumnCreate,
+    SheriffConfig,
+    SheriffOutputField,
+    SheriffRunCreate,
+    TableCreate,
+)
 from app.tables.sheriff.prompts import (
     display_name_for_key,
     interpolate_prompt,
@@ -10,13 +17,6 @@ from app.tables.sheriff.prompts import (
     unique_child_name,
 )
 from app.tables.sheriff.protocol import UnknownPlaceholderError
-from app.tables.schemas import (
-    SheriffConfig,
-    SheriffOutputField,
-    SheriffRunCreate,
-    ColumnCreate,
-    TableCreate,
-)
 
 
 def test_placeholder_interpolation_and_child_names() -> None:

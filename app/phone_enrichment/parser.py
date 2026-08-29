@@ -1,10 +1,10 @@
 import html
 import re
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, ClassVar
 
 import phonenumbers
-from phonenumbers import PhoneNumberFormat, NumberParseException
+from phonenumbers import NumberParseException, PhoneNumberFormat
 
 _PHONE_CANDIDATE = re.compile(
     r"(?<![\w])(?:\+|00)[ \t]*\d(?:[\d \t()./\-]{5,}\d)"
@@ -20,8 +20,12 @@ _QUOTED_HISTORY = [
 
 
 class _ReplyHTMLParser(HTMLParser):
-    _ignored_tags = {"blockquote", "script", "style"}
-    _line_break_tags = {"br", "div", "p", "li", "tr"}
+    _ignored_tags: ClassVar[frozenset[str]] = frozenset(
+        {"blockquote", "script", "style"}
+    )
+    _line_break_tags: ClassVar[frozenset[str]] = frozenset(
+        {"br", "div", "p", "li", "tr"}
+    )
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -35,9 +39,7 @@ class _ReplyHTMLParser(HTMLParser):
         elif self._ignored_depth == 0 and tag in self._line_break_tags:
             self.parts.append("\n")
 
-    def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self._ignored_depth == 0 and tag.casefold() in self._line_break_tags:
             self.parts.append("\n")
 
@@ -54,7 +56,7 @@ class _ReplyHTMLParser(HTMLParser):
 
 
 def reply_to_text(body: str) -> str:
-    if re.search(r"<\s*(?:html|body|div|p|br|table|blockquote)\b", body, re.I):
+    if re.search(r"<\s*(?:html|body|div|p|br|table|blockquote)\b", body, re.IGNORECASE):
         parser = _ReplyHTMLParser()
         parser.feed(body)
         parser.close()
@@ -71,7 +73,11 @@ def reply_to_text(body: str) -> str:
             break
         if re.match(r"^\s*From:\s+", line, re.IGNORECASE):
             following = "\n".join(lines[index + 1 : index + 5])
-            if re.search(r"^\s*(?:Sent|Date|To|Subject):", following, re.I | re.M):
+            if re.search(
+                r"^\s*(?:Sent|Date|To|Subject):",
+                following,
+                re.IGNORECASE | re.MULTILINE,
+            ):
                 break
         kept.append(line)
     return "\n".join(kept)
@@ -96,7 +102,9 @@ def normalize_phone(value: Any) -> str | None:
     return phonenumbers.format_number(parsed, PhoneNumberFormat.E164)
 
 
-def extract_phone_from_replies(replies: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+def extract_phone_from_replies(
+    replies: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
     ordered = sorted(
         replies,
         key=lambda reply: str(reply.get("received_at") or ""),

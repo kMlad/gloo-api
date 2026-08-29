@@ -56,9 +56,7 @@ async def add_campaign(
         raise HTTPException(status_code=upstream_status, detail=str(exc)) from exc
 
 
-@router.patch(
-    "/campaigns/{smartlead_campaign_id}", response_model=CampaignResponse
-)
+@router.patch("/campaigns/{smartlead_campaign_id}", response_model=CampaignResponse)
 async def update_campaign(
     smartlead_campaign_id: int,
     payload: CampaignUpdate,
@@ -70,7 +68,9 @@ async def update_campaign(
         reply_types=payload.reply_types,
     )
     if campaign is None:
-        raise HTTPException(status_code=404, detail="SmartLead campaign is not configured")
+        raise HTTPException(
+            status_code=404, detail="SmartLead campaign is not configured"
+        )
     return campaign
 
 
@@ -89,7 +89,9 @@ async def create_import(
     try:
         return await service.run(payload or ImportRequest())
     except ConcurrentImportError as exc:
-        raise HTTPException(status_code=409, detail="A SmartLead import is already running") from exc
+        raise HTTPException(
+            status_code=409, detail="A SmartLead import is already running"
+        ) from exc
     except ImportLimitExceeded as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

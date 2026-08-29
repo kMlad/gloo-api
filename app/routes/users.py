@@ -1,13 +1,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from supabase import AsyncClient, AuthApiError
 
 from app.auth import AuthenticatedUser, require_authenticated_user
 from app.env import Env, get_env
 from app.models import AppRole, InviteUserRequest, InviteUserResponse
 from app.supabase_client import get_supabase
 from app.utils import normalize_email, utc_now
+from supabase import AsyncClient, AuthApiError
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 

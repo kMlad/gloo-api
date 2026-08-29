@@ -4,8 +4,6 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from supabase import AsyncClient, acreate_client
-
 from perplexity import AsyncPerplexity
 
 from app.env import get_env, load_cors_allowed_origins
@@ -19,6 +17,8 @@ from app.phone_enrichment.providers.base import FixedWindowRateLimiter
 from app.phone_enrichment.repository import EnrichmentRepository
 from app.phone_enrichment.routes import (
     internal_router as phone_enrichment_router,
+)
+from app.phone_enrichment.routes import (
     webhook_router as phone_enrichment_webhook_router,
 )
 from app.phone_enrichment.service import PhoneEnrichmentService
@@ -37,10 +37,11 @@ from app.tables.email_enrichment import (
     ProspeoEmailClient,
 )
 from app.tables.email_enrichment.routes import router as email_enrichment_webhook_router
-from app.tables.sheriff.perplexity import PerplexitySheriffAgent
 from app.tables.repository import TableRepository
 from app.tables.routes import router as tables_router
 from app.tables.service import TableService
+from app.tables.sheriff.perplexity import PerplexitySheriffAgent
+from supabase import AsyncClient, acreate_client
 
 
 @asynccontextmanager

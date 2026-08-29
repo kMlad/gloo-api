@@ -64,9 +64,7 @@ async def get_phone_enrichment(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@internal_router.post(
-    "/{run_id}/reconcile", response_model=PhoneEnrichmentRunResponse
-)
+@internal_router.post("/{run_id}/reconcile", response_model=PhoneEnrichmentRunResponse)
 async def reconcile_phone_enrichment(
     run_id: UUID, service: ServiceDependency
 ) -> dict[str, Any]:

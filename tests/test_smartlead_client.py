@@ -14,7 +14,9 @@ async def test_retries_rate_limits_and_keeps_api_key_in_query() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if len(requests) == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "slow"})
+            return httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"error": "slow"}
+            )
         return httpx.Response(
             200,
             json=[{"id": 1, "name": "Interested", "sentiment_type": "positive"}],

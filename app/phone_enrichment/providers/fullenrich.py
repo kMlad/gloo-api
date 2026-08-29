@@ -6,11 +6,15 @@ from app.phone_enrichment.providers.base import BaseProviderClient, ProviderResu
 
 
 class FullEnrichClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 
-    async def submit(self, contacts: list[dict[str, Any]], webhook_url: str) -> ProviderResult:
+    async def submit(
+        self, contacts: list[dict[str, Any]], webhook_url: str
+    ) -> ProviderResult:
         payload = {
             "name": "Gloo phone enrichment",
             "data": contacts,
@@ -31,8 +35,10 @@ class FullEnrichClient(BaseProviderClient):
             "webhook_events": {"contact_finished": "[configured]"},
         }
         response = result.response_payload
-        if result.http_status is not None and result.http_status < 400 and isinstance(
-            response, dict
+        if (
+            result.http_status is not None
+            and result.http_status < 400
+            and isinstance(response, dict)
         ):
             job_id = response.get("enrichment_id")
             if job_id:

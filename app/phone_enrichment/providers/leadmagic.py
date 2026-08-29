@@ -7,7 +7,9 @@ from app.phone_enrichment.providers.linkedin import person_linkedin_url
 
 
 class LeadMagicClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 

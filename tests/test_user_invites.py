@@ -5,13 +5,13 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretStr
-from supabase import AuthApiError
 from supabase_auth.types import User, UserResponse
 
 from app.env import Env, get_env
 from app.main import create_app
 from app.models import AppRole
 from app.supabase_client import get_supabase
+from supabase import AuthApiError
 
 INVITE_URL = "/api/v1/users/invites"
 
@@ -100,7 +100,9 @@ class AuthStub:
     ) -> None:
         self.current_user = current_user
         self.get_user_error = get_user_error
-        self.admin = AuthAdminStub(invited or _user(role="sdr", email="new@example.com"))
+        self.admin = AuthAdminStub(
+            invited or _user(role="sdr", email="new@example.com")
+        )
 
     async def get_user(self, jwt: str | None = None) -> UserResponse | None:
         if self.get_user_error is not None:
@@ -136,7 +138,9 @@ async def test_invite_requires_a_valid_user_jwt() -> None:
     supabase = SupabaseStub(AuthStub(current_user=None))
     app = _app(supabase)
 
-    missing = await _post(app, token=None, json={"email": "a@example.com", "role": "sdr"})
+    missing = await _post(
+        app, token=None, json={"email": "a@example.com", "role": "sdr"}
+    )
     assert missing.status_code == 401
 
     supabase.auth.get_user_error = AuthApiError("invalid JWT", 401, "bad_jwt")

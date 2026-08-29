@@ -1,6 +1,7 @@
 from app.tables.sheriff.protocol import (
     DEFAULT_SHERIFF_MODEL,
     SHERIFF_MODELS,
+    InvalidPlaceholderError,
     PerplexityUsage,
     SheriffAgent,
     SheriffExpandResult,
@@ -9,13 +10,13 @@ from app.tables.sheriff.protocol import (
     SheriffResearchResult,
     SheriffSource,
     SheriffUnavailableError,
-    InvalidPlaceholderError,
     UnknownPlaceholderError,
 )
 
 __all__ = [
     "DEFAULT_SHERIFF_MODEL",
     "SHERIFF_MODELS",
+    "InvalidPlaceholderError",
     "PerplexityUsage",
     "SheriffAgent",
     "SheriffExpandResult",
@@ -24,6 +25,5 @@ __all__ = [
     "SheriffResearchResult",
     "SheriffSource",
     "SheriffUnavailableError",
-    "InvalidPlaceholderError",
     "UnknownPlaceholderError",
 ]

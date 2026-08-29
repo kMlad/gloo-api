@@ -7,7 +7,9 @@ from app.phone_enrichment.providers.linkedin import person_linkedin_url
 
 
 class ProspeoClient(BaseProviderClient):
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, api_key: str, **kwargs: Any
+    ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
 
@@ -39,8 +41,10 @@ class ProspeoClient(BaseProviderClient):
             result.error_message = None
             return result
         response = result.response_payload
-        if result.http_status is not None and result.http_status < 400 and isinstance(
-            response, dict
+        if (
+            result.http_status is not None
+            and result.http_status < 400
+            and isinstance(response, dict)
         ):
             person = response.get("person")
             mobile = person.get("mobile") if isinstance(person, dict) else None

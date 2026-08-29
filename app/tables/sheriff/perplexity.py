@@ -45,10 +45,7 @@ class PerplexitySheriffAgent:
     ) -> SheriffExpandResult:
         columns = ", ".join(column_names) if column_names else "(none)"
         payload = await self._create(
-            input=(
-                f"Available columns: {columns}\n\n"
-                f"Goal:\n{goal}"
-            ),
+            input=(f"Available columns: {columns}\n\nGoal:\n{goal}"),
             instructions=EXPAND_INSTRUCTIONS,
             schema_name="sheriff_expand",
             schema=expand_json_schema(),
@@ -106,7 +103,9 @@ class PerplexitySheriffAgent:
                     "confidence_reason": data.get("confidence_reason"),
                     "sources": data.get("sources") or [],
                     "usage_cost": usage_cost,
-                    "usage": usage.model_dump() if isinstance(usage, PerplexityUsage) else None,
+                    "usage": usage.model_dump()
+                    if isinstance(usage, PerplexityUsage)
+                    else None,
                 },
             }
         )
@@ -154,7 +153,9 @@ class PerplexitySheriffAgent:
         if dumped.get("status") not in {None, "completed"}:
             error = dumped.get("error") or {}
             message = error.get("message") if isinstance(error, dict) else None
-            raise RuntimeError(message or f"Sheriff agent status {dumped.get('status')}")
+            raise RuntimeError(
+                message or f"Sheriff agent status {dumped.get('status')}"
+            )
         text = _output_text(dumped)
         if not text:
             raise RuntimeError("Sheriff agent returned an empty response")
@@ -173,9 +174,7 @@ class PerplexitySheriffAgent:
         }
 
 
-def _research_max_steps(
-    web_search: bool, web_search_limit: int | None
-) -> int:
+def _research_max_steps(web_search: bool, web_search_limit: int | None) -> int:
     if not web_search:
         return 1
     if web_search_limit is None:
@@ -338,7 +337,7 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     except json.JSONDecodeError as error:
         raise ValueError("Sheriff agent did not return valid JSON") from error
     if not isinstance(parsed, dict):
-        raise ValueError("Sheriff agent JSON must be an object")
+        raise TypeError("Sheriff agent JSON must be an object")
     return parsed
 
 

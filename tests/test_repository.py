@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.repositories import Repository
-from app.tables.repository import TableRepository, _ROW_LIST_CHUNK
+from app.tables.repository import _ROW_LIST_CHUNK, TableRepository
 
 
 class QueryStub:
@@ -46,7 +46,9 @@ class DatabaseStub:
 
 
 @pytest.mark.asyncio
-async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types() -> None:
+async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types() -> (
+    None
+):
     lead = {
         "id": "lead-1",
         "email": "person@example.com",
@@ -64,8 +66,16 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
                             "lead_id": "lead-1",
                             "reply_type": "positive",
                         },
-                        {"id": "conversation-ooo", "lead_id": "lead-1", "reply_type": "ooo"},
-                        {"id": "conversation-stale", "lead_id": "lead-1", "reply_type": None},
+                        {
+                            "id": "conversation-ooo",
+                            "lead_id": "lead-1",
+                            "reply_type": "ooo",
+                        },
+                        {
+                            "id": "conversation-stale",
+                            "lead_id": "lead-1",
+                            "reply_type": None,
+                        },
                     ]
                 )
             ],
@@ -135,7 +145,9 @@ async def test_table_rows_use_exact_count_and_range() -> None:
 
 @pytest.mark.asyncio
 async def test_table_list_all_rows_pages_until_short_chunk() -> None:
-    first_page = [{"id": f"row-{index}", "position": index} for index in range(_ROW_LIST_CHUNK)]
+    first_page = [
+        {"id": f"row-{index}", "position": index} for index in range(_ROW_LIST_CHUNK)
+    ]
     second_page = [{"id": "row-last", "position": _ROW_LIST_CHUNK}]
     database = DatabaseStub(
         {

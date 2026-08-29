@@ -258,7 +258,10 @@ async def test_email_enrichment_run_writes_valid_email_and_skips_blank_rows() ->
     assert finished["succeeded_count"] == 1
     assert finished["skipped_count"] == 1
     assert finished["not_found_count"] == 0
-    rows = {row["id"]: row for row in (await service.list_rows(table["id"], limit=10, offset=0))["items"]}
+    rows = {
+        row["id"]: row
+        for row in (await service.list_rows(table["id"], limit=10, offset=0))["items"]
+    }
     succeeded = rows[filled["id"]]["values"][str(parent["id"])]
     assert succeeded["status"] == "succeeded"
     assert succeeded["email"] == "ada@acme.com"
@@ -283,7 +286,9 @@ async def test_email_enrichment_run_writes_valid_email_and_skips_blank_rows() ->
 
 
 @pytest.mark.asyncio
-async def test_email_enrichment_batches_fullenrich_and_completes_from_webhooks() -> None:
+async def test_email_enrichment_batches_fullenrich_and_completes_from_webhooks() -> (
+    None
+):
     fullenrich = FakeFullEnrichEmail()
     validator = FakeValidator("ok")
     service, _repository = _service(
@@ -315,7 +320,9 @@ async def test_email_enrichment_batches_fullenrich_and_completes_from_webhooks()
                     values={
                         ids["First name"]: first_name,
                         ids["Last name"]: last_name,
-                        ids["LinkedIn"]: f"https://linkedin.com/in/{first_name.lower()}",
+                        ids[
+                            "LinkedIn"
+                        ]: f"https://linkedin.com/in/{first_name.lower()}",
                         ids["Company"]: "Acme",
                         ids["Domain"]: "acme.com",
                     }
@@ -480,9 +487,9 @@ async def test_email_enrichment_rechecks_rejected_emails_on_a_new_run() -> None:
         created_by=str(uuid4()),
     )
     await service.execute_email_enrichment_run(str(first["id"]))
-    first_cell = (
-        await service.list_rows(table["id"], limit=10, offset=0)
-    )["items"][0]["values"][str(parent["id"])]
+    first_cell = (await service.list_rows(table["id"], limit=10, offset=0))["items"][0][
+        "values"
+    ][str(parent["id"])]
     assert first_cell["rejected_emails"] == ["ada@acme.com"]
 
     validator.result = "ok"
@@ -494,16 +501,18 @@ async def test_email_enrichment_rechecks_rejected_emails_on_a_new_run() -> None:
     )
     await service.execute_email_enrichment_run(str(second["id"]))
 
-    second_cell = (
-        await service.list_rows(table["id"], limit=10, offset=0)
-    )["items"][0]["values"][str(parent["id"])]
+    second_cell = (await service.list_rows(table["id"], limit=10, offset=0))["items"][
+        0
+    ]["values"][str(parent["id"])]
     assert validator.calls == ["ada@acme.com", "ada@acme.com"]
     assert second_cell["status"] == "succeeded"
     assert second_cell["rejected_emails"] == []
 
 
 @pytest.mark.asyncio
-async def test_email_enrichment_retries_candidate_after_transient_validation_failure() -> None:
+async def test_email_enrichment_retries_candidate_after_transient_validation_failure() -> (
+    None
+):
     email = "ada@acme.com"
     finder = FakeFinder(emails=[email])
 
@@ -560,9 +569,9 @@ async def test_email_enrichment_retries_candidate_after_transient_validation_fai
         created_by=str(uuid4()),
     )
     await service.execute_email_enrichment_run(str(first["id"]))
-    first_cell = (
-        await service.list_rows(table["id"], limit=10, offset=0)
-    )["items"][0]["values"][str(parent["id"])]
+    first_cell = (await service.list_rows(table["id"], limit=10, offset=0))["items"][0][
+        "values"
+    ][str(parent["id"])]
     assert first_cell["status"] == "failed"
     assert first_cell["error"] == "MillionVerifier rate limit exceeded"
     assert first_cell["rejected_emails"] == []
@@ -574,9 +583,9 @@ async def test_email_enrichment_retries_candidate_after_transient_validation_fai
         created_by=str(uuid4()),
     )
     await service.execute_email_enrichment_run(str(second["id"]))
-    second_cell = (
-        await service.list_rows(table["id"], limit=10, offset=0)
-    )["items"][0]["values"][str(parent["id"])]
+    second_cell = (await service.list_rows(table["id"], limit=10, offset=0))["items"][
+        0
+    ]["values"][str(parent["id"])]
 
     assert finder.calls == 2
     assert validator.calls == [email, email]
@@ -590,9 +599,7 @@ async def test_email_enrichment_cell_includes_waterfall_steps() -> None:
     icypeas = FakeFinder(emails=["test@gmail.com"])
     kitt = FakeFinder(emails=["test@gmail.com"])
     prospeo = FakeFinder(emails=["test1@gmail.com"])
-    validator = FakeValidator(
-        {"test@gmail.com": "catch_all", "test1@gmail.com": "ok"}
-    )
+    validator = FakeValidator({"test@gmail.com": "catch_all", "test1@gmail.com": "ok"})
     service, _repository = _service(
         email_finders={"icypeas": icypeas, "kitt": kitt, "prospeo": prospeo},
         email_validator=validator,
@@ -666,13 +673,13 @@ async def test_email_enrichment_filters_only_support_is_empty() -> None:
     parent = next(
         column for column in created["columns"] if column["type"] == "email_enrichment"
     )
-    with pytest.raises(TableValidationError, match="only support is_empty and is_not_empty"):
+    with pytest.raises(
+        TableValidationError, match="only support is_empty and is_not_empty"
+    ):
         await service.replace_filters(
             table["id"],
             TableFiltersUpdate(
-                filters=[
-                    TableFilter(column_id=parent["id"], operator="eq", value="x")
-                ]
+                filters=[TableFilter(column_id=parent["id"], operator="eq", value="x")]
             ),
         )
     updated = await service.replace_filters(
@@ -690,7 +697,9 @@ async def test_email_enrichment_create_stores_accept_catchall() -> None:
     table, ids = await _table_with_inputs(service)
     created = await service.add_column(
         table["id"],
-        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+        _enrichment_payload(
+            ids, email_enrichment=_column_ids(ids, accept_catchall=True)
+        ),
     )
     parent = next(
         column for column in created["columns"] if column["type"] == "email_enrichment"
@@ -802,7 +811,9 @@ async def test_email_enrichment_patch_cannot_turn_off_accept_catchall() -> None:
     table, ids = await _table_with_inputs(service)
     created = await service.add_column(
         table["id"],
-        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+        _enrichment_payload(
+            ids, email_enrichment=_column_ids(ids, accept_catchall=True)
+        ),
     )
     parent = next(
         column for column in created["columns"] if column["type"] == "email_enrichment"
@@ -832,7 +843,9 @@ async def test_email_enrichment_run_falls_back_to_catchall() -> None:
     table, ids = await _table_with_inputs(service)
     created = await service.add_column(
         table["id"],
-        _enrichment_payload(ids, email_enrichment=_column_ids(ids, accept_catchall=True)),
+        _enrichment_payload(
+            ids, email_enrichment=_column_ids(ids, accept_catchall=True)
+        ),
     )
     parent = next(
         column for column in created["columns"] if column["type"] == "email_enrichment"
@@ -868,4 +881,3 @@ async def test_email_enrichment_run_falls_back_to_catchall() -> None:
     assert cell["validation_result"] == "catch_all"
     assert cell["rejected_emails"] == []
     assert listed["items"][0]["values"][str(child["id"])] == "ada@acme.com"
-

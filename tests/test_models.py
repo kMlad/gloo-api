@@ -6,9 +6,9 @@ from app.models import CampaignCreate, CampaignUpdate, InviteUserRequest
 
 def test_campaign_reply_type_defaults_and_valid_combinations() -> None:
     assert CampaignCreate(smartlead_campaign_id=1).reply_types == ["positive"]
-    assert CampaignCreate(
-        smartlead_campaign_id=1, reply_types=["ooo"]
-    ).reply_types == ["ooo"]
+    assert CampaignCreate(smartlead_campaign_id=1, reply_types=["ooo"]).reply_types == [
+        "ooo"
+    ]
     assert CampaignCreate(
         smartlead_campaign_id=1, reply_types=["positive", "ooo"]
     ).reply_types == ["positive", "ooo"]

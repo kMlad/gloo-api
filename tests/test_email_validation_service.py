@@ -43,7 +43,9 @@ class FailingValidator:
         )
 
 
-async def _table_with_email(service, *, extra_columns: list[ColumnCreate] | None = None):
+async def _table_with_email(
+    service, *, extra_columns: list[ColumnCreate] | None = None
+):
     columns = [ColumnCreate(name="Email")]
     if extra_columns:
         columns.extend(extra_columns)
@@ -67,9 +69,7 @@ def _validation_payload(email_column_id: str, **overrides) -> ColumnCreate:
 
 def _parent_and_child(created: dict):
     parent = next(
-        column
-        for column in created["columns"]
-        if column["type"] == "email_validation"
+        column for column in created["columns"] if column["type"] == "email_validation"
     )
     child = next(
         column
@@ -83,9 +83,7 @@ def _parent_and_child(created: dict):
 async def test_email_validation_column_stores_config_and_rejects_table_create() -> None:
     service, _repository = _service(email_validator=FakeValidator())
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent, child = _parent_and_child(created)
     assert parent["config"] == {
         "email_column_id": ids["Email"],
@@ -127,13 +125,9 @@ async def test_email_validation_requires_a_text_source_column() -> None:
         service, extra_columns=[ColumnCreate(name="Active", type="boolean")]
     )
     with pytest.raises(TableValidationError, match="must reference a text column"):
-        await service.add_column(
-            table["id"], _validation_payload(ids["Active"])
-        )
+        await service.add_column(table["id"], _validation_payload(ids["Active"]))
     with pytest.raises(TableValidationError, match="Unknown input column"):
-        await service.add_column(
-            table["id"], _validation_payload(str(uuid4()))
-        )
+        await service.add_column(table["id"], _validation_payload(str(uuid4())))
 
 
 @pytest.mark.asyncio
@@ -141,9 +135,7 @@ async def test_email_validation_run_writes_result_and_skips_blank_rows() -> None
     validator = FakeValidator("ok")
     service, _repository = _service(email_validator=validator)
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent, child = _parent_and_child(created)
     filled = await service.add_row(
         table["id"],
@@ -192,13 +184,9 @@ async def test_email_validation_run_writes_result_and_skips_blank_rows() -> None
 async def test_email_validation_run_requires_validator_and_skips_succeeded() -> None:
     service, _repository = _service()
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent = next(
-        column
-        for column in created["columns"]
-        if column["type"] == "email_validation"
+        column for column in created["columns"] if column["type"] == "email_validation"
     )
     with pytest.raises(EmailEnrichmentUnavailableError):
         await service.start_email_validation_run(
@@ -211,13 +199,9 @@ async def test_email_validation_run_requires_validator_and_skips_succeeded() -> 
     validator = FakeValidator("ok")
     service, _repository = _service(email_validator=validator)
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent = next(
-        column
-        for column in created["columns"]
-        if column["type"] == "email_validation"
+        column for column in created["columns"] if column["type"] == "email_validation"
     )
     row = await service.add_row(
         table["id"],
@@ -246,9 +230,7 @@ async def test_email_validation_treats_catchall_as_invalid_unless_accepted() -> 
     validator = FakeValidator("catch_all")
     service, _repository = _service(email_validator=validator)
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent, child = _parent_and_child(created)
     row = await service.add_row(
         table["id"],
@@ -290,13 +272,9 @@ async def test_email_validation_treats_catchall_as_invalid_unless_accepted() -> 
 async def test_email_validation_run_marks_provider_failures() -> None:
     service, _repository = _service(email_validator=FailingValidator())
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent = next(
-        column
-        for column in created["columns"]
-        if column["type"] == "email_validation"
+        column for column in created["columns"] if column["type"] == "email_validation"
     )
     row = await service.add_row(
         table["id"],
@@ -323,13 +301,9 @@ async def test_email_validation_run_marks_provider_failures() -> None:
 async def test_email_validation_filters_only_support_is_empty() -> None:
     service, _repository = _service(email_validator=FakeValidator())
     table, ids = await _table_with_email(service)
-    created = await service.add_column(
-        table["id"], _validation_payload(ids["Email"])
-    )
+    created = await service.add_column(table["id"], _validation_payload(ids["Email"]))
     parent = next(
-        column
-        for column in created["columns"]
-        if column["type"] == "email_validation"
+        column for column in created["columns"] if column["type"] == "email_validation"
     )
     with pytest.raises(TableValidationError, match="only support is_empty"):
         await service.replace_filters(

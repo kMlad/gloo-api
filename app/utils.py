@@ -1,12 +1,10 @@
 from collections.abc import Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
-def chunks(values: list[T], size: int) -> Iterator[list[T]]:
+def chunks[T](values: list[T], size: int) -> Iterator[list[T]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
 
@@ -27,7 +25,7 @@ def parse_datetime(value: Any, *, default: datetime | None = None) -> datetime:
     if isinstance(value, datetime):
         parsed = value
     elif isinstance(value, str) and value:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     elif default is not None:
         return default
     else:
@@ -48,9 +46,7 @@ def merge_non_empty(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
     for key, value in incoming.items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = merge_non_empty(result[key], value)
-        elif is_non_empty(value):
-            result[key] = deepcopy(value)
-        elif key not in result:
+        elif is_non_empty(value) or key not in result:
             result[key] = deepcopy(value)
     return result
 

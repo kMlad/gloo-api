@@ -56,7 +56,9 @@ class FakeTableRepository:
                 {
                     **table,
                     "column_count": sum(
-                        1 for column in self.columns.values() if column["table_id"] == table_id
+                        1
+                        for column in self.columns.values()
+                        if column["table_id"] == table_id
                     ),
                     "row_count": sum(
                         1 for row in self.rows.values() if row["table_id"] == table_id
@@ -345,7 +347,9 @@ class FakeTableRepository:
         self.email_runs[run_id] = stored
         return deepcopy(stored)
 
-    async def update_email_enrichment_run(self, run_id: str, values: dict) -> dict | None:
+    async def update_email_enrichment_run(
+        self, run_id: str, values: dict
+    ) -> dict | None:
         run = self.email_runs.get(run_id)
         if run is None:
             return None
@@ -420,7 +424,9 @@ class FakeTableRepository:
         item["updated_at"] = _now()
         return deepcopy(item)
 
-    async def insert_email_enrichment_attempts(self, attempts: list[dict]) -> list[dict]:
+    async def insert_email_enrichment_attempts(
+        self, attempts: list[dict]
+    ) -> list[dict]:
         stored = []
         for attempt in attempts:
             record = {**attempt, "id": attempt.get("id") or str(uuid4())}
@@ -452,9 +458,7 @@ class FakeTableRepository:
             return None
         return deepcopy(max(attempts, key=lambda item: int(item.get("sequence") or 0)))
 
-    async def list_email_enrichment_attempts_for_item(
-        self, item_id: str
-    ) -> list[dict]:
+    async def list_email_enrichment_attempts_for_item(self, item_id: str) -> list[dict]:
         attempts = [
             deepcopy(item)
             for item in self.email_attempts
@@ -511,7 +515,9 @@ class FakeTableRepository:
         self.validation_runs[run_id] = stored
         return deepcopy(stored)
 
-    async def update_email_validation_run(self, run_id: str, values: dict) -> dict | None:
+    async def update_email_validation_run(
+        self, run_id: str, values: dict
+    ) -> dict | None:
         run = self.validation_runs.get(run_id)
         if run is None:
             return None
@@ -560,13 +566,18 @@ class FakeTableRepository:
         item["updated_at"] = _now()
         return deepcopy(item)
 
-    def _assert_unique_column(self, column: dict, *, ignore_id: str | None = None) -> None:
+    def _assert_unique_column(
+        self, column: dict, *, ignore_id: str | None = None
+    ) -> None:
         for existing in self.columns.values():
             if existing["id"] == ignore_id:
                 continue
             if existing["table_id"] != column["table_id"]:
                 continue
-            if existing["name"] == column["name"] or existing["position"] == column["position"]:
+            if (
+                existing["name"] == column["name"]
+                or existing["position"] == column["position"]
+            ):
                 raise _unique_error()
 
     def _assert_unique_row_position(self, row: dict) -> None:
@@ -608,7 +619,9 @@ async def test_create_table_and_add_column_leaves_existing_cells_empty() -> None
     )
     assert row["values"][str(company_id)] == "Acme"
 
-    added = await service.add_column(table["id"], ColumnCreate(name="Active", type="boolean"))
+    added = await service.add_column(
+        table["id"], ColumnCreate(name="Active", type="boolean")
+    )
     listed = await service.list_rows(table["id"], limit=100, offset=0)
     assert listed["items"][0]["values"][str(company_id)] == "Acme"
     assert listed["items"][0]["values"][str(added["id"])] is None
@@ -622,7 +635,11 @@ async def test_reorder_columns_persists_positions() -> None:
     table = await service.create_table(
         TableCreate(
             name="Sheet",
-            columns=[ColumnCreate(name="A"), ColumnCreate(name="B"), ColumnCreate(name="C")],
+            columns=[
+                ColumnCreate(name="A"),
+                ColumnCreate(name="B"),
+                ColumnCreate(name="C"),
+            ],
         ),
         created_by=str(uuid4()),
     )
@@ -649,9 +666,13 @@ async def test_filters_eq_contains_is_empty_and_is_not_empty() -> None:
     )
     company_id = table["columns"][0]["id"]
     active_id = table["columns"][1]["id"]
-    await service.add_row(table["id"], RowCreate(values={company_id: "Acme", active_id: True}))
+    await service.add_row(
+        table["id"], RowCreate(values={company_id: "Acme", active_id: True})
+    )
     await service.add_row(table["id"], RowCreate(values={company_id: "Globex"}))
-    await service.add_row(table["id"], RowCreate(values={company_id: "Initech", active_id: False}))
+    await service.add_row(
+        table["id"], RowCreate(values={company_id: "Initech", active_id: False})
+    )
 
     await service.replace_filters(
         table["id"],
@@ -751,7 +772,10 @@ async def test_filters_chain_and_or_logic() -> None:
             filters=[
                 TableFilter(column_id=europe_id, operator="contains", value="Yes"),
                 TableFilter(
-                    column_id=europe_id, operator="contains", value="Unclear", logic="or"
+                    column_id=europe_id,
+                    operator="contains",
+                    value="Unclear",
+                    logic="or",
                 ),
             ]
         ),
@@ -769,9 +793,14 @@ async def test_filters_chain_and_or_logic() -> None:
             filters=[
                 TableFilter(column_id=europe_id, operator="contains", value="Yes"),
                 TableFilter(
-                    column_id=europe_id, operator="contains", value="Unclear", logic="or"
+                    column_id=europe_id,
+                    operator="contains",
+                    value="Unclear",
+                    logic="or",
                 ),
-                TableFilter(column_id=active_id, operator="eq", value=True, logic="and"),
+                TableFilter(
+                    column_id=active_id, operator="eq", value=True, logic="and"
+                ),
             ]
         ),
     )
@@ -819,7 +848,10 @@ async def test_cell_merge_and_clear() -> None:
     table = await service.create_table(
         TableCreate(
             name="Sheet",
-            columns=[ColumnCreate(name="Name"), ColumnCreate(name="Active", type="boolean")],
+            columns=[
+                ColumnCreate(name="Name"),
+                ColumnCreate(name="Active", type="boolean"),
+            ],
         ),
         created_by=str(uuid4()),
     )
@@ -917,7 +949,9 @@ async def test_rename_hide_and_delete_column_strips_values() -> None:
     drop_id = str(table["columns"][1]["id"])
     row = await service.add_row(
         table["id"],
-        RowCreate(values={table["columns"][0]["id"]: "a", table["columns"][1]["id"]: "b"}),
+        RowCreate(
+            values={table["columns"][0]["id"]: "a", table["columns"][1]["id"]: "b"}
+        ),
     )
     hidden = await service.update_column(
         table["id"], drop_id, ColumnUpdate(name="Gone", hidden=True)
@@ -992,7 +1026,9 @@ async def test_list_rows_pages_filtered_matches() -> None:
     await service.replace_filters(
         table["id"],
         TableFiltersUpdate(
-            filters=[TableFilter(column_id=company_id, operator="contains", value="acme")]
+            filters=[
+                TableFilter(column_id=company_id, operator="contains", value="acme")
+            ]
         ),
     )
     listed = await service.list_rows(table["id"], limit=2, offset=2)
@@ -1036,9 +1072,7 @@ async def test_export_csv_uses_current_view() -> None:
         table["id"],
         RowCreate(values={company_id: "Initech", name_id: "Sam"}),
     )
-    await service.update_column(
-        table["id"], str(name_id), ColumnUpdate(hidden=True)
-    )
+    await service.update_column(table["id"], str(name_id), ColumnUpdate(hidden=True))
     await service.replace_filters(
         table["id"],
         TableFiltersUpdate(
@@ -1054,9 +1088,7 @@ async def test_export_csv_uses_current_view() -> None:
     ]
 
     await service.replace_filters(table["id"], TableFiltersUpdate(filters=[]))
-    await service.reorder_columns(
-        table["id"], [active_id, company_id, name_id]
-    )
+    await service.reorder_columns(table["id"], [active_id, company_id, name_id])
     filename, content = await service.export_csv(
         table["id"], sort_column_id=str(company_id), sort_direction="asc"
     )

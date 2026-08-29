@@ -322,9 +322,7 @@ async def test_import_preserves_all_properties_and_only_inbound_replies() -> Non
 @pytest.mark.asyncio
 async def test_import_accepts_current_flat_master_inbox_shape() -> None:
     repository = FakeRepository()
-    service = ImportService(
-        repository, CurrentSmartLeadShape(), max_conversations=1000
-    )
+    service = ImportService(repository, CurrentSmartLeadShape(), max_conversations=1000)
 
     result = await service.run(ImportRequest())
 
@@ -380,9 +378,7 @@ async def test_same_email_across_campaigns_creates_one_lead_and_two_snapshots() 
 @pytest.mark.asyncio
 async def test_disabled_requested_campaign_is_rejected_before_a_run_starts() -> None:
     repository = FakeRepository(
-        campaigns=[
-            {"smartlead_campaign_id": 10, "name": "Disabled", "enabled": False}
-        ]
+        campaigns=[{"smartlead_campaign_id": 10, "name": "Disabled", "enabled": False}]
     )
     service = ImportService(repository, FakeSmartLead(), max_conversations=1000)
 
@@ -477,15 +473,13 @@ async def test_ooo_only_campaign_imports_and_classifies_ooo_replies() -> None:
     )
     smartlead = CategorizedSmartLead({10: 6})
 
-    result = await ImportService(
-        repository, smartlead, max_conversations=1000
-    ).run(ImportRequest())
+    result = await ImportService(repository, smartlead, max_conversations=1000).run(
+        ImportRequest()
+    )
 
     assert result["status"] == "succeeded"
     assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
-    assert {
-        categories for _, categories, _ in smartlead.inbox_calls
-    } == {(6,)}
+    assert {categories for _, categories, _ in smartlead.inbox_calls} == {(6,)}
 
 
 @pytest.mark.asyncio
@@ -508,16 +502,15 @@ async def test_mixed_campaign_reply_types_are_fetched_separately() -> None:
     )
     smartlead = CategorizedSmartLead({10: 1, 11: 6})
 
-    result = await ImportService(
-        repository, smartlead, max_conversations=1000
-    ).run(ImportRequest())
+    result = await ImportService(repository, smartlead, max_conversations=1000).run(
+        ImportRequest()
+    )
 
     assert result["conversations_processed"] == 2
     assert repository.conversations[(10, "map-10")]["reply_type"] == "positive"
     assert repository.conversations[(11, "map-11")]["reply_type"] == "ooo"
     assert {
-        (campaigns, categories)
-        for campaigns, categories, _ in smartlead.inbox_calls
+        (campaigns, categories) for campaigns, categories, _ in smartlead.inbox_calls
     } == {((10,), (1,)), ((11,), (6,))}
 
 
@@ -563,9 +556,7 @@ async def test_date_bounded_import_does_not_clear_missing_classification() -> No
     await service.run(ImportRequest())
 
     smartlead.categories_by_campaign.clear()
-    await service.run(
-        ImportRequest(reply_time_from=datetime(2026, 8, 1, tzinfo=UTC))
-    )
+    await service.run(ImportRequest(reply_time_from=datetime(2026, 8, 1, tzinfo=UTC)))
 
     assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
     assert len(repository.clear_calls) == 1

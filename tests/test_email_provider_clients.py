@@ -106,9 +106,7 @@ async def test_prospeo_extracts_person_email_and_treats_no_match() -> None:
         body = json.loads(request.content)
         assert body["enrich_mobile"] is False
         assert "only_verified_email" not in body
-        return httpx.Response(
-            200, json={"person": {"email": "ada@acme.com"}}
-        )
+        return httpx.Response(200, json={"person": {"email": "ada@acme.com"}})
 
     async with httpx.AsyncClient(
         base_url="https://api.prospeo.io/", transport=httpx.MockTransport(found_handler)
