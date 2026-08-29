@@ -461,6 +461,33 @@ async def test_run_stays_queued_until_a_worker_starts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_skips_already_completed_items_on_resume() -> None:
+    agent = FakeSheriffAgent()
+    service, _repository = _service(agent)
+    table = await service.create_table(
+        TableCreate(name="Sheet", columns=[ColumnCreate(name="Company")]),
+        created_by=str(uuid4()),
+    )
+    company_id = table["columns"][0]["id"]
+    row = await service.add_row(table["id"], RowCreate(values={company_id: "Acme"}))
+    created = await service.add_column(table["id"], _sheriff_payload())
+    parent = next(column for column in created["columns"] if column["name"] == "CEO")
+    run = await service.start_sheriff_run(
+        table["id"],
+        parent["id"],
+        SheriffRunCreate(row_ids=[row["id"]]),
+        created_by=str(uuid4()),
+    )
+    await service.execute_sheriff_run(run["id"])
+    assert len(agent.research_calls) == 1
+    await service.execute_sheriff_run(run["id"])
+    assert len(agent.research_calls) == 1
+    finished = await service.get_sheriff_run(table["id"], parent["id"], run["id"])
+    assert finished["status"] == "succeeded"
+    assert finished["items"][0]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_queued_items_fail_when_execute_cannot_start() -> None:
     service, _repository = _service(FakeSheriffAgent())
     table = await service.create_table(

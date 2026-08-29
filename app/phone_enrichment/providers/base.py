@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -24,6 +25,39 @@ _AUDIT_HEADERS = {
 }
 
 
+class FixedWindowRateLimiter:
+    """Coordinates a provider's fixed calendar-minute request budget."""
+
+    def __init__(
+        self,
+        max_calls: int,
+        *,
+        clock: Callable[[], float] = time.time,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._max_calls = max_calls
+        self._clock = clock
+        self._sleep = sleeper
+        self._window = -1
+        self._calls = 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        while True:
+            wait_seconds = 0.0
+            async with self._lock:
+                now = self._clock()
+                window = int(now // 60)
+                if window != self._window:
+                    self._window = window
+                    self._calls = 0
+                if self._calls < self._max_calls:
+                    self._calls += 1
+                    return
+                wait_seconds = max(((window + 1) * 60) - now, 0.05)
+            await self._sleep(wait_seconds)
+
+
 @dataclass(slots=True)
 class ProviderResult:
     status: str
@@ -45,11 +79,13 @@ class BaseProviderClient:
         max_retries: int,
         concurrency: int,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        request_limiter: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._http = http_client
         self._max_retries = max_retries
         self._semaphore = asyncio.Semaphore(concurrency)
         self._sleep = sleeper
+        self._request_limiter = request_limiter
 
     async def _request_json(
         self,
@@ -63,6 +99,8 @@ class BaseProviderClient:
         async with self._semaphore:
             for attempt in range(self._max_retries + 1):
                 try:
+                    if self._request_limiter is not None:
+                        await self._request_limiter()
                     response = await self._http.request(
                         method,
                         path.lstrip("/"),

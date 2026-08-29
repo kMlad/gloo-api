@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -10,6 +11,7 @@ from app.tables.email_enrichment import (
     EmailFinder,
     EmailInputs,
     EmailValidator,
+    FullEnrichEmailClient,
     run_waterfall,
 )
 from app.tables.email_enrichment.inputs import (
@@ -18,7 +20,11 @@ from app.tables.email_enrichment.inputs import (
     normalize_email,
     person_linkedin,
 )
-from app.tables.email_enrichment.protocol import AttemptRecord, WaterfallStep
+from app.tables.email_enrichment.protocol import (
+    AttemptRecord,
+    WaterfallStep,
+    WaterfallStepEmail,
+)
 from app.tables.sheriff import (
     DEFAULT_SHERIFF_MODEL,
     SHERIFF_MODELS,
@@ -75,6 +81,10 @@ class TableConflictError(Exception):
     pass
 
 
+class InvalidFullEnrichEmailWebhookError(Exception):
+    pass
+
+
 class TableService:
     def __init__(
         self,
@@ -84,6 +94,7 @@ class TableService:
         sheriff_concurrency: int = 3,
         email_finders: dict[str, EmailFinder] | None = None,
         email_validator: EmailValidator | None = None,
+        fullenrich_email: FullEnrichEmailClient | None = None,
         email_concurrency: int = 3,
     ) -> None:
         self._repository = repository
@@ -91,6 +102,7 @@ class TableService:
         self._concurrency = sheriff_concurrency
         self._email_finders = email_finders or {}
         self._email_validator = email_validator
+        self._fullenrich_email = fullenrich_email
         self._email_concurrency = email_concurrency
 
     async def list_tables(self) -> dict[str, Any]:
@@ -581,9 +593,10 @@ class TableService:
             }
             items = await self._repository.list_sheriff_run_items(run_id)
             semaphore = asyncio.Semaphore(self._concurrency)
+            overwrite = bool(run.get("overwrite"))
 
             async def process(item: dict[str, Any]) -> None:
-                if item["status"] == "skipped":
+                if item["status"] not in {"queued", "running"}:
                     return
                 async with semaphore:
                     await self._execute_sheriff_item(
@@ -597,6 +610,7 @@ class TableService:
                         model=config.model,
                         web_search=config.web_search,
                         web_search_limit=config.web_search_limit,
+                        overwrite=overwrite,
                         item=item,
                         row=rows.get(str(item["row_id"])),
                     )
@@ -641,6 +655,9 @@ class TableService:
         _validate_email_input_columns(config, columns, column_id)
         rows = await self._repository.list_all_rows(table_id)
         selected = _select_run_rows(rows, payload.row_ids)
+        active_row_ids = await self._repository.list_active_email_enrichment_row_ids(
+            column_id, [str(row["id"]) for row in selected]
+        )
         now = to_iso(utc_now())
         run = await self._repository.insert_email_enrichment_run(
             {
@@ -671,11 +688,13 @@ class TableService:
             row_id = str(row["id"])
             values = dict(row.get("values") or {})
             cell = values.get(column_id)
-            skip = (
+            skip_succeeded = (
                 not payload.overwrite
                 and isinstance(cell, dict)
                 and cell.get("status") == "succeeded"
             )
+            skip_active = row_id in active_row_ids
+            skip = skip_succeeded or skip_active
             item_status = "skipped" if skip else "queued"
             if skip:
                 skipped += 1
@@ -685,8 +704,14 @@ class TableService:
             items.append(
                 {
                     "run_id": run_id,
+                    "column_id": column_id,
                     "row_id": row_id,
                     "status": item_status,
+                    "error_message": (
+                        "An email enrichment is already active for this row"
+                        if skip_active
+                        else None
+                    ),
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -725,11 +750,11 @@ class TableService:
             items = await self._repository.list_email_enrichment_run_items(run_id)
             semaphore = asyncio.Semaphore(self._email_concurrency)
 
-            async def process(item: dict[str, Any]) -> None:
+            async def process(item: dict[str, Any]) -> dict[str, Any] | None:
                 if item["status"] == "skipped":
-                    return
+                    return None
                 async with semaphore:
-                    await self._execute_email_enrichment_item(
+                    return await self._execute_email_enrichment_item(
                         table_id=table_id,
                         column=column,
                         columns=columns,
@@ -740,7 +765,10 @@ class TableService:
                         row=rows.get(str(item["row_id"])),
                     )
 
-            await asyncio.gather(*(process(item) for item in items))
+            results = await asyncio.gather(*(process(item) for item in items))
+            pending = [result for result in results if result is not None]
+            if pending:
+                await self._submit_fullenrich_email_batches(run_id, pending)
         except Exception as error:
             await self._fail_open_email_run_items(
                 run_id,
@@ -1208,7 +1236,7 @@ class TableService:
         validator: EmailValidator,
         item: dict[str, Any],
         row: dict[str, Any] | None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         item_id = str(item["id"])
         column_id = str(column["id"])
         if row is None:
@@ -1256,13 +1284,22 @@ class TableService:
             )
             return
         try:
+            defer_fullenrich = (
+                self._fullenrich_email is not None
+                and "fullenrich" in config.providers
+            )
+            providers = (
+                [provider for provider in config.providers if provider != "fullenrich"]
+                if defer_fullenrich
+                else list(config.providers)
+            )
             outcome = await run_waterfall(
-                providers=list(config.providers),
+                providers=providers,
                 finders=self._email_finders,
                 validator=validator,
                 inputs=inputs,
                 rejected_emails=rejected,
-                accept_catchall=config.accept_catchall,
+                accept_catchall=config.accept_catchall and not defer_fullenrich,
             )
         except Exception as error:
             values[column_id] = _email_enrichment_cell(
@@ -1274,6 +1311,50 @@ class TableService:
                 {"status": "failed", "error_message": str(error)},
             )
             return
+        if defer_fullenrich and outcome.status != "succeeded":
+            await self._persist_email_attempts(
+                run_id=str(item["run_id"]),
+                item_id=item_id,
+                attempts=outcome.attempts,
+            )
+            sequence = max(
+                (attempt.sequence for attempt in outcome.attempts), default=0
+            ) + 1
+            assert self._fullenrich_email is not None
+            contact = self._fullenrich_email.contact(
+                inputs,
+                run_id=str(item["run_id"]),
+                item_id=item_id,
+                row_id=row_id,
+            )
+            inserted = await self._repository.insert_email_enrichment_attempts(
+                [
+                    {
+                        "run_id": str(item["run_id"]),
+                        "item_id": item_id,
+                        "provider": "fullenrich",
+                        "sequence": sequence,
+                        "status": "in_progress",
+                        "request_payload": contact,
+                        "response_headers": {},
+                        "started_at": to_iso(utc_now()),
+                        "created_at": to_iso(utc_now()),
+                        "updated_at": to_iso(utc_now()),
+                    }
+                ]
+            )
+            values[column_id] = _email_enrichment_cell(
+                status="running",
+                rejected_emails=outcome.rejected_emails,
+                steps=outcome.steps,
+            )
+            await self._repository.replace_row_values([(row_id, values)])
+            return {
+                "attempt_id": str(inserted[0]["id"]),
+                "item_id": item_id,
+                "row_id": row_id,
+                "contact": contact,
+            }
         child = children.get("email")
         if outcome.status == "succeeded" and outcome.email and child is not None:
             values[str(child["id"])] = outcome.email
@@ -1299,6 +1380,336 @@ class TableService:
             item_id=item_id,
             attempts=outcome.attempts,
         )
+
+    async def _submit_fullenrich_email_batches(
+        self, run_id: str, pending: list[dict[str, Any]]
+    ) -> None:
+        client = self._fullenrich_email
+        if client is None:
+            return
+        run = await self._repository.get_email_enrichment_run_by_id(run_id)
+        if run is None:
+            return
+        table_id = str(run["table_id"])
+        column_id = str(run["column_id"])
+        for offset in range(0, len(pending), 100):
+            batch = pending[offset : offset + 100]
+            result = await client.submit(
+                [entry["contact"] for entry in batch], run_id=run_id
+            )
+            now = to_iso(utc_now())
+            waiting = result.status == "waiting" and result.external_request_id
+            for entry in batch:
+                attempt_values = {
+                    "status": "waiting" if waiting else result.status,
+                    "response_payload": result.response_payload,
+                    "response_headers": result.response_headers or {},
+                    "http_status": result.http_status,
+                    "external_request_id": result.external_request_id,
+                    "error_code": result.error_code,
+                    "error_message": result.error_message,
+                }
+                if not waiting:
+                    attempt_values["completed_at"] = now
+                await self._repository.update_email_enrichment_attempt(
+                    entry["attempt_id"], attempt_values
+                )
+                item_status = "waiting" if waiting else "failed"
+                await self._repository.update_email_enrichment_run_item(
+                    entry["item_id"],
+                    {
+                        "status": item_status,
+                        "error_message": None if waiting else result.error_message,
+                    },
+                )
+                row = await self._repository.get_row(
+                    table_id, entry["row_id"]
+                )
+                if row is None:
+                    continue
+                values = dict(row.get("values") or {})
+                cell = values.get(column_id)
+                if not isinstance(cell, dict):
+                    cell = _email_enrichment_cell(status=item_status)
+                values[column_id] = {
+                    **cell,
+                    "status": item_status,
+                    "error": None if waiting else result.error_message,
+                }
+                await self._repository.replace_row_values(
+                    [(entry["row_id"], values)]
+                )
+
+    async def process_fullenrich_email_webhook(
+        self, raw_body: bytes, signature: str
+    ) -> None:
+        client = self._fullenrich_email
+        if client is None or not client.verify_webhook(raw_body, signature):
+            raise InvalidFullEnrichEmailWebhookError(
+                "Invalid FullEnrich email webhook signature"
+            )
+        try:
+            payload = json.loads(raw_body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise InvalidFullEnrichEmailWebhookError(
+                "Invalid FullEnrich email webhook payload"
+            ) from error
+        if not isinstance(payload, dict):
+            raise InvalidFullEnrichEmailWebhookError(
+                "Invalid FullEnrich email webhook payload"
+            )
+        records = payload.get("data")
+        records = records if isinstance(records, list) else []
+        processed_items: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            custom = record.get("custom")
+            if not isinstance(custom, dict):
+                continue
+            item_id = str(custom.get("item_id") or "")
+            if not item_id:
+                continue
+            processed_items.add(item_id)
+            await self._complete_fullenrich_email_item(
+                item_id, record=record, payload=payload
+            )
+
+        provider_status = str(payload.get("status") or "").upper()
+        external_id = payload.get("id") or payload.get("enrichment_id")
+        if external_id is None or provider_status == "IN_PROGRESS":
+            return
+        attempts = (
+            await self._repository.list_email_enrichment_attempts_by_external_id(
+                str(external_id)
+            )
+        )
+        terminal_failure = provider_status in {
+            "CANCELED",
+            "CREDITS_INSUFFICIENT",
+            "RATE_LIMIT",
+            "UNKNOWN",
+        }
+        for attempt in attempts:
+            item_id = str(attempt["item_id"])
+            if item_id in processed_items:
+                continue
+            await self._complete_fullenrich_email_item(
+                item_id,
+                record=None,
+                payload=payload,
+                terminal_error=(
+                    f"FullEnrich job ended with {provider_status}"
+                    if terminal_failure
+                    else None
+                ),
+            )
+
+    async def _complete_fullenrich_email_item(
+        self,
+        item_id: str,
+        *,
+        record: dict[str, Any] | None,
+        payload: dict[str, Any],
+        terminal_error: str | None = None,
+    ) -> None:
+        item = await self._repository.claim_waiting_email_enrichment_run_item(item_id)
+        if item is None:
+            return
+        run_id = str(item["run_id"])
+        run = await self._repository.get_email_enrichment_run_by_id(run_id)
+        attempt = await self._repository.get_email_enrichment_attempt(
+            item_id, "fullenrich"
+        )
+        if run is None or attempt is None:
+            return
+        table_id = str(run["table_id"])
+        column_id = str(run["column_id"])
+        row = await self._repository.get_row(table_id, str(item["row_id"]))
+        if row is None:
+            await self._repository.update_email_enrichment_run_item(
+                item_id, {"status": "failed", "error_message": "Row not found"}
+            )
+            await self._finalize_email_enrichment_run(run_id)
+            return
+        values = dict(row.get("values") or {})
+        cell = values.get(column_id)
+        cell = cell if isinstance(cell, dict) else _email_enrichment_cell(status="running")
+        if terminal_error is not None:
+            await self._repository.update_email_enrichment_attempt(
+                str(attempt["id"]),
+                {
+                    "status": "failed",
+                    "response_payload": payload,
+                    "error_code": str(payload.get("status") or "unknown").casefold(),
+                    "error_message": terminal_error,
+                    "completed_at": to_iso(utc_now()),
+                },
+            )
+            values[column_id] = {**cell, "status": "failed", "error": terminal_error}
+            await self._repository.replace_row_values([(str(item["row_id"]), values)])
+            await self._repository.update_email_enrichment_run_item(
+                item_id, {"status": "failed", "error_message": terminal_error}
+            )
+            await self._finalize_email_enrichment_run(run_id)
+            return
+
+        client = self._fullenrich_email
+        assert client is not None
+        emails = client.emails_from_record(record) if record is not None else []
+        external_id = payload.get("id") or payload.get("enrichment_id")
+        await self._repository.update_email_enrichment_attempt(
+            str(attempt["id"]),
+            {
+                "status": "found" if emails else "not_found",
+                "response_payload": record if record is not None else payload,
+                "external_request_id": (
+                    str(external_id) if external_id is not None else None
+                ),
+                "email_candidate": emails[0] if emails else None,
+                "completed_at": to_iso(utc_now()),
+            },
+        )
+
+        steps = _email_steps_from_cell(cell)
+        fullenrich_step = WaterfallStep(
+            provider="fullenrich", status="found" if emails else "not_found"
+        )
+        rejected = list(cell.get("rejected_emails") or [])
+        rejected_keys = {email.casefold() for email in rejected}
+        validator = self._require_email_validator()
+        sequence = int(attempt.get("sequence") or 0)
+        validation_attempts: list[AttemptRecord] = []
+        found_email: str | None = None
+        validation_error: str | None = None
+        for email in emails:
+            sequence += 1
+            if email.casefold() in rejected_keys:
+                validation_attempts.append(
+                    AttemptRecord(
+                        provider="millionverifier",
+                        sequence=sequence,
+                        status="skipped_cached",
+                        request_payload={"email": email},
+                        email_candidate=email,
+                    )
+                )
+                fullenrich_step.emails.append(
+                    WaterfallStepEmail(email=email, validation="skipped")
+                )
+                continue
+            verification = await validator.verify(email)
+            valid = verification.status == "ok" or verification.result == "ok"
+            hard_error = verification.status in _VALIDATION_HARD_ERRORS
+            validation_attempts.append(
+                AttemptRecord(
+                    provider="millionverifier",
+                    sequence=sequence,
+                    status=(
+                        verification.status
+                        if hard_error
+                        else ("valid" if valid else "invalid")
+                    ),
+                    request_payload=verification.request_payload,
+                    response_payload=verification.response_payload,
+                    response_headers=verification.response_headers,
+                    http_status=verification.http_status,
+                    email_candidate=email,
+                    validation_result=verification.result,
+                    error_code=verification.error_code,
+                    error_message=verification.error_message,
+                )
+            )
+            fullenrich_step.emails.append(
+                WaterfallStepEmail(
+                    email=email,
+                    validation=(
+                        verification.status
+                        if hard_error
+                        else ("valid" if valid else "invalid")
+                    ),
+                )
+            )
+            if hard_error:
+                validation_error = (
+                    verification.error_message
+                    or "MillionVerifier verification failed"
+                )
+                break
+            if valid:
+                found_email = email
+                break
+            rejected_keys.add(email.casefold())
+            rejected.append(email)
+        steps.append(fullenrich_step)
+        await self._persist_email_attempts(
+            run_id=run_id, item_id=item_id, attempts=validation_attempts
+        )
+
+        status = "succeeded" if found_email else "not_found"
+        provider = "fullenrich" if found_email else None
+        validation_result = "ok" if found_email else None
+        if validation_error is not None:
+            status = "failed"
+        elif found_email is None:
+            columns = await self._require_columns(table_id)
+            column = _column_by_id(columns, column_id)
+            config = _parse_email_enrichment_config(column.get("config"))
+            if config.accept_catchall:
+                attempts = (
+                    await self._repository.list_email_enrichment_attempts_for_item(
+                        item_id
+                    )
+                )
+                catchalls = [
+                    item
+                    for item in attempts
+                    if item.get("validation_result") == "catch_all"
+                    and item.get("email_candidate")
+                ]
+                if catchalls:
+                    first = min(
+                        catchalls, key=lambda item: int(item.get("sequence") or 0)
+                    )
+                    found_email = str(first["email_candidate"])
+                    provider = _provider_for_email_steps(steps, found_email)
+                    if provider is not None:
+                        status = "succeeded"
+                        validation_result = "catch_all"
+                        rejected = [
+                            email
+                            for email in rejected
+                            if email.casefold() != found_email.casefold()
+                        ]
+                        _mark_step_email_valid(steps, found_email)
+
+        columns = await self._require_columns(table_id)
+        child = next(
+            (
+                column
+                for column in columns
+                if str(column.get("source_column_id") or "") == column_id
+                and column.get("source_field") == "email"
+            ),
+            None,
+        )
+        if status == "succeeded" and found_email and child is not None:
+            values[str(child["id"])] = found_email
+        values[column_id] = _email_enrichment_cell(
+            status=status,
+            email=found_email,
+            provider=provider,
+            validation_result=validation_result,
+            rejected_emails=rejected,
+            steps=steps,
+            error=validation_error,
+        )
+        await self._repository.replace_row_values([(str(item["row_id"]), values)])
+        await self._repository.update_email_enrichment_run_item(
+            item_id, {"status": status, "error_message": validation_error}
+        )
+        await self._finalize_email_enrichment_run(run_id)
+        await self._repository.update_table(table_id)
 
     async def _reclassify_catchall_rows(
         self,
@@ -1448,12 +1859,26 @@ class TableService:
         failed = sum(1 for item in items if item["status"] == "failed")
         skipped = sum(1 for item in items if item["status"] == "skipped")
         not_found = sum(1 for item in items if item["status"] == "not_found")
-        if failed and (succeeded or not_found):
+        waiting = sum(1 for item in items if item["status"] == "waiting")
+        running = sum(
+            1 for item in items if item["status"] in {"queued", "running"}
+        )
+        completed_at: str | None
+        if running:
+            status = "running"
+            completed_at = None
+        elif waiting:
+            status = "waiting"
+            completed_at = None
+        elif failed and (succeeded or not_found):
             status = "partial"
+            completed_at = to_iso(utc_now())
         elif failed:
             status = "failed"
+            completed_at = to_iso(utc_now())
         else:
             status = "succeeded"
+            completed_at = to_iso(utc_now())
         await self._repository.update_email_enrichment_run(
             run_id,
             {
@@ -1463,7 +1888,7 @@ class TableService:
                 "skipped_count": skipped,
                 "not_found_count": not_found,
                 "total_count": len(items),
-                "completed_at": to_iso(utc_now()),
+                "completed_at": completed_at,
             },
         )
 
@@ -1588,6 +2013,7 @@ class TableService:
         model: str,
         web_search: bool,
         web_search_limit: int | None,
+        overwrite: bool,
         item: dict[str, Any],
         row: dict[str, Any] | None,
     ) -> None:
@@ -1608,6 +2034,16 @@ class TableService:
             )
             return
         values = dict(fresh.get("values") or {})
+        cell = values.get(column_id)
+        if (
+            not overwrite
+            and isinstance(cell, dict)
+            and cell.get("status") == "succeeded"
+        ):
+            await self._repository.update_sheriff_run_item(
+                item_id, {"status": "skipped"}
+            )
+            return
         values[column_id] = _sheriff_cell(status="running")
         await self._repository.replace_row_values([(row_id, values)])
         await self._repository.update_sheriff_run_item(item_id, {"status": "running"})
@@ -2181,6 +2617,45 @@ def _provider_for_email(cell: dict[str, Any], email: str) -> str | None:
                 provider = step.get("provider")
                 return provider if isinstance(provider, str) and provider else None
     return None
+
+
+def _email_steps_from_cell(cell: dict[str, Any]) -> list[WaterfallStep]:
+    steps: list[WaterfallStep] = []
+    for raw_step in cell.get("steps") or []:
+        if not isinstance(raw_step, dict):
+            continue
+        provider = raw_step.get("provider")
+        status = raw_step.get("status")
+        if not isinstance(provider, str) or not isinstance(status, str):
+            continue
+        emails = [
+            WaterfallStepEmail(
+                email=str(item["email"]), validation=str(item["validation"])
+            )
+            for item in raw_step.get("emails") or []
+            if isinstance(item, dict)
+            and item.get("email")
+            and item.get("validation")
+        ]
+        steps.append(WaterfallStep(provider=provider, status=status, emails=emails))
+    return steps
+
+
+def _provider_for_email_steps(
+    steps: list[WaterfallStep], email: str
+) -> str | None:
+    for step in steps:
+        if any(item.email == email for item in step.emails):
+            return step.provider
+    return None
+
+
+def _mark_step_email_valid(steps: list[WaterfallStep], email: str) -> None:
+    for step in steps:
+        for item in step.emails:
+            if item.email == email and item.validation == "invalid":
+                item.validation = "valid"
+                return
 
 
 def _promote_catchall_cell(

@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 
 import httpx
@@ -131,52 +133,50 @@ async def test_prospeo_extracts_person_email_and_treats_no_match() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fullenrich_polls_until_work_email() -> None:
+async def test_fullenrich_submits_webhook_batch_and_extracts_work_email() -> None:
     calls = {"count": 0}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         calls["count"] += 1
-        if request.method == "POST":
-            body = json.loads(request.content)
-            assert body["data"][0]["enrich_fields"] == ["contact.work_emails"]
-            return httpx.Response(200, json={"enrichment_id": "job-1"})
-        return httpx.Response(
-            200,
-            json={
-                "status": "FINISHED",
-                "data": [
-                    {
-                        "contact_info": {
-                            "most_probable_work_email": {
-                                "email": "ada@acme.com",
-                                "status": "DELIVERABLE",
-                            }
-                        }
-                    }
-                ],
-            },
-        )
-
-    async def sleeper(delay: float) -> None:
-        raise AssertionError("should not poll after FINISHED")
+        body = json.loads(request.content)
+        assert body["webhook_url"] == "https://api.example.com/fullenrich"
+        assert body["webhook_events"]["contact_finished"] == body["webhook_url"]
+        assert body["data"][0]["enrich_fields"] == ["contact.work_emails"]
+        assert body["data"][0]["custom"]["item_id"] == "item-1"
+        return httpx.Response(200, json={"enrichment_id": "job-1"})
 
     async with httpx.AsyncClient(
         base_url="https://app.fullenrich.com/api/v2/",
         transport=httpx.MockTransport(handler),
     ) as http_client:
-        result = await FullEnrichEmailClient(
+        client = FullEnrichEmailClient(
             http_client,
             "secret",
+            webhook_url="https://api.example.com/fullenrich",
             max_retries=0,
             concurrency=1,
-            poll_timeout_seconds=10,
-            poll_interval_seconds=1,
-            sleeper=sleeper,
-        ).find_email(_INPUTS)
+        )
+        contact = client.contact(
+            _INPUTS, run_id="run-1", item_id="item-1", row_id="row-1"
+        )
+        result = await client.submit([contact], run_id="run-1")
 
-    assert result.status == "found"
-    assert result.emails == ["ada@acme.com"]
-    assert calls["count"] == 2
+    record = {
+        "contact_info": {
+            "most_probable_work_email": {
+                "email": "ada@acme.com",
+                "status": "DELIVERABLE",
+            }
+        }
+    }
+    raw_body = b'{"id":"job-1"}'
+    signature = hmac.new(b"secret", raw_body, hashlib.sha1).hexdigest()
+    assert result.status == "waiting"
+    assert result.external_request_id == "job-1"
+    assert client.emails_from_record(record) == ["ada@acme.com"]
+    assert client.verify_webhook(raw_body, signature) is True
+    assert client.verify_webhook(raw_body, "incorrect") is False
+    assert calls["count"] == 1
 
 
 @pytest.mark.asyncio

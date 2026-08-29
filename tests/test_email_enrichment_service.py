@@ -1,7 +1,9 @@
+import json
 from uuid import uuid4
 
 import pytest
 
+from app.phone_enrichment.providers.base import ProviderResult
 from app.tables.email_enrichment import EmailEnrichmentUnavailableError
 from app.tables.email_enrichment.protocol import FindEmailResult, ValidationResult
 from app.tables.schemas import (
@@ -47,6 +49,40 @@ class FakeValidator:
             request_payload={"email": email},
             result=value,
         )
+
+
+class FakeFullEnrichEmail:
+    def __init__(self) -> None:
+        self.batches: list[list[dict]] = []
+
+    @staticmethod
+    def contact(inputs, *, run_id: str, item_id: str, row_id: str) -> dict:
+        return {
+            "first_name": inputs.first_name,
+            "last_name": inputs.last_name,
+            "domain": inputs.domain,
+            "enrich_fields": ["contact.work_emails"],
+            "custom": {"run_id": run_id, "item_id": item_id, "row_id": row_id},
+        }
+
+    async def submit(self, contacts: list[dict], *, run_id: str) -> ProviderResult:
+        self.batches.append(contacts)
+        return ProviderResult(
+            status="waiting",
+            request_payload={"data": contacts},
+            response_payload={"enrichment_id": "job-1"},
+            http_status=200,
+            external_request_id="job-1",
+        )
+
+    @staticmethod
+    def verify_webhook(raw_body: bytes, signature: str) -> bool:
+        return signature == "valid"
+
+    @staticmethod
+    def emails_from_record(record: dict) -> list[str]:
+        email = (record.get("contact_info") or {}).get("email")
+        return [email] if isinstance(email, str) else []
 
 
 def _input_columns(table: dict) -> dict[str, str]:
@@ -244,6 +280,88 @@ async def test_email_enrichment_run_writes_valid_email_and_skips_blank_rows() ->
             filled["id"],
             RowUpdate(values={parent["id"]: "nope"}),
         )
+
+
+@pytest.mark.asyncio
+async def test_email_enrichment_batches_fullenrich_and_completes_from_webhooks() -> None:
+    fullenrich = FakeFullEnrichEmail()
+    validator = FakeValidator("ok")
+    service, _repository = _service(
+        email_validator=validator,
+        fullenrich_email=fullenrich,
+    )
+    table, ids = await _table_with_inputs(service)
+    created = await service.add_column(
+        table["id"],
+        _enrichment_payload(
+            ids,
+            email_enrichment=_column_ids(ids, providers=["fullenrich"]),
+        ),
+    )
+    parent = next(
+        column for column in created["columns"] if column["type"] == "email_enrichment"
+    )
+    child = next(
+        column
+        for column in created["columns"]
+        if str(column.get("source_column_id") or "") == str(parent["id"])
+    )
+    rows = []
+    for first_name, last_name in (("Ada", "Lovelace"), ("Grace", "Hopper")):
+        rows.append(
+            await service.add_row(
+                table["id"],
+                RowCreate(
+                    values={
+                        ids["First name"]: first_name,
+                        ids["Last name"]: last_name,
+                        ids["LinkedIn"]: f"https://linkedin.com/in/{first_name.lower()}",
+                        ids["Company"]: "Acme",
+                        ids["Domain"]: "acme.com",
+                    }
+                ),
+            )
+        )
+    run = await service.start_email_enrichment_run(
+        table["id"],
+        str(parent["id"]),
+        SheriffRunCreate(),
+        created_by=str(uuid4()),
+    )
+    await service.execute_email_enrichment_run(str(run["id"]))
+
+    waiting = await service.get_email_enrichment_run(
+        table["id"], str(parent["id"]), str(run["id"])
+    )
+    assert waiting["status"] == "waiting"
+    assert len(fullenrich.batches) == 1
+    assert len(fullenrich.batches[0]) == 2
+
+    for contact in fullenrich.batches[0]:
+        email = f"{contact['first_name'].lower()}@acme.com"
+        payload = {
+            "id": "job-1",
+            "status": "IN_PROGRESS",
+            "data": [
+                {
+                    "custom": contact["custom"],
+                    "contact_info": {"email": email},
+                }
+            ],
+        }
+        await service.process_fullenrich_email_webhook(
+            json.dumps(payload).encode(), "valid"
+        )
+
+    finished = await service.get_email_enrichment_run(
+        table["id"], str(parent["id"]), str(run["id"])
+    )
+    assert finished["status"] == "succeeded"
+    assert finished["succeeded_count"] == 2
+    listed = await service.list_rows(table["id"], limit=10, offset=0)
+    by_id = {row["id"]: row for row in listed["items"]}
+    assert by_id[rows[0]["id"]]["values"][str(child["id"])] == "ada@acme.com"
+    assert by_id[rows[1]["id"]]["values"][str(child["id"])] == "grace@acme.com"
 
 
 @pytest.mark.asyncio

@@ -384,6 +384,22 @@ class FakeTableRepository:
         ]
         return sorted(items, key=lambda item: (item["created_at"], item["id"]))
 
+    async def get_email_enrichment_run_item(self, item_id: str) -> dict | None:
+        item = self.email_run_items.get(item_id)
+        return deepcopy(item) if item else None
+
+    async def list_active_email_enrichment_row_ids(
+        self, column_id: str, row_ids: list[str]
+    ) -> set[str]:
+        wanted = set(row_ids)
+        return {
+            str(item["row_id"])
+            for item in self.email_run_items.values()
+            if item.get("column_id") == column_id
+            and item.get("row_id") in wanted
+            and item.get("status") in {"queued", "running", "waiting"}
+        }
+
     async def update_email_enrichment_run_item(
         self, item_id: str, values: dict
     ) -> dict | None:
@@ -394,6 +410,16 @@ class FakeTableRepository:
         item["updated_at"] = _now()
         return deepcopy(item)
 
+    async def claim_waiting_email_enrichment_run_item(
+        self, item_id: str
+    ) -> dict | None:
+        item = self.email_run_items.get(item_id)
+        if item is None or item.get("status") != "waiting":
+            return None
+        item["status"] = "running"
+        item["updated_at"] = _now()
+        return deepcopy(item)
+
     async def insert_email_enrichment_attempts(self, attempts: list[dict]) -> list[dict]:
         stored = []
         for attempt in attempts:
@@ -401,6 +427,50 @@ class FakeTableRepository:
             self.email_attempts.append(record)
             stored.append(deepcopy(record))
         return stored
+
+    async def update_email_enrichment_attempt(
+        self, attempt_id: str, values: dict
+    ) -> dict | None:
+        attempt = next(
+            (item for item in self.email_attempts if item["id"] == attempt_id), None
+        )
+        if attempt is None:
+            return None
+        attempt.update(values)
+        attempt["updated_at"] = _now()
+        return deepcopy(attempt)
+
+    async def get_email_enrichment_attempt(
+        self, item_id: str, provider: str
+    ) -> dict | None:
+        attempts = [
+            item
+            for item in self.email_attempts
+            if item.get("item_id") == item_id and item.get("provider") == provider
+        ]
+        if not attempts:
+            return None
+        return deepcopy(max(attempts, key=lambda item: int(item.get("sequence") or 0)))
+
+    async def list_email_enrichment_attempts_for_item(
+        self, item_id: str
+    ) -> list[dict]:
+        attempts = [
+            deepcopy(item)
+            for item in self.email_attempts
+            if item.get("item_id") == item_id
+        ]
+        return sorted(attempts, key=lambda item: int(item.get("sequence") or 0))
+
+    async def list_email_enrichment_attempts_by_external_id(
+        self, external_request_id: str
+    ) -> list[dict]:
+        return [
+            deepcopy(item)
+            for item in self.email_attempts
+            if item.get("provider") == "fullenrich"
+            and item.get("external_request_id") == external_request_id
+        ]
 
     async def list_email_enrichment_runs_for_column(self, column_id: str) -> list[dict]:
         runs = [
@@ -509,7 +579,7 @@ class FakeTableRepository:
 
 
 def _service(
-    agent=None, *, email_finders=None, email_validator=None
+    agent=None, *, email_finders=None, email_validator=None, fullenrich_email=None
 ) -> tuple[TableService, FakeTableRepository]:
     repository = FakeTableRepository()
     return (
@@ -518,6 +588,7 @@ def _service(
             sheriff_agent=agent,
             email_finders=email_finders,
             email_validator=email_validator,
+            fullenrich_email=fullenrich_email,
         ),
         repository,
     )

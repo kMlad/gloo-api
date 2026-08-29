@@ -1,14 +1,13 @@
-from collections.abc import Awaitable, Callable
+import hashlib
+import hmac
 from typing import Any
 
 import httpx
 
-from app.phone_enrichment.providers.base import BaseProviderClient
+from app.phone_enrichment.providers.base import BaseProviderClient, ProviderResult
 from app.tables.email_enrichment.inputs import normalize_email
-from app.tables.email_enrichment.protocol import EmailInputs, FindEmailResult
-from app.tables.email_enrichment.providers.base import to_find_result, unique_emails
-
-_TERMINAL_FAILURE = {"CANCELED", "CREDITS_INSUFFICIENT", "RATE_LIMIT", "UNKNOWN"}
+from app.tables.email_enrichment.protocol import EmailInputs
+from app.tables.email_enrichment.providers.base import unique_emails
 
 
 class FullEnrichEmailClient(BaseProviderClient):
@@ -17,17 +16,18 @@ class FullEnrichEmailClient(BaseProviderClient):
         http_client: httpx.AsyncClient,
         api_key: str,
         *,
-        poll_timeout_seconds: float = 90.0,
-        poll_interval_seconds: float = 2.0,
+        webhook_url: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(http_client, **kwargs)
         self._api_key = api_key
-        self._poll_timeout_seconds = poll_timeout_seconds
-        self._poll_interval_seconds = poll_interval_seconds
+        self._webhook_url = webhook_url
 
-    async def find_email(self, inputs: EmailInputs) -> FindEmailResult:
-        contact = {
+    @staticmethod
+    def contact(
+        inputs: EmailInputs, *, run_id: str, item_id: str, row_id: str
+    ) -> dict[str, Any]:
+        return {
             key: value
             for key, value in {
                 "first_name": inputs.first_name,
@@ -36,56 +36,62 @@ class FullEnrichEmailClient(BaseProviderClient):
                 "company_name": inputs.company_name,
                 "linkedin_url": inputs.linkedin_url,
                 "enrich_fields": ["contact.work_emails"],
+                "custom": {
+                    "run_id": run_id,
+                    "item_id": item_id,
+                    "row_id": row_id,
+                },
             }.items()
             if value not in (None, "")
         }
-        payload = {"name": "Gloo email enrichment", "data": [contact]}
-        submitted = await self._request_json(
+
+    async def submit(
+        self, contacts: list[dict[str, Any]], *, run_id: str
+    ) -> ProviderResult:
+        payload = {
+            "name": f"Gloo email enrichment {run_id}",
+            "webhook_url": self._webhook_url,
+            "webhook_events": {"contact_finished": self._webhook_url},
+            "data": contacts,
+        }
+        result = await self._request_json(
             "POST",
             "/contact/enrich/bulk",
             request_payload=payload,
             headers={"Authorization": f"Bearer {self._api_key}"},
             params={"silentFail": "true"},
         )
-        if submitted.status in {"failed", "rate_limited", "timed_out"}:
-            return to_find_result(submitted)
-        response = submitted.response_payload
+        result.request_payload = {
+            **payload,
+            "webhook_url": "[configured]",
+            "webhook_events": {"contact_finished": "[configured]"},
+        }
+        response = result.response_payload
         enrichment_id = None
         if isinstance(response, dict):
             enrichment_id = response.get("enrichment_id")
-        if not enrichment_id:
-            submitted.status = "failed"
-            submitted.error_code = "missing_enrichment_id"
-            submitted.error_message = "FullEnrich did not return an enrichment ID"
-            return to_find_result(submitted)
-        elapsed = 0.0
-        latest = submitted
-        while elapsed <= self._poll_timeout_seconds:
-            latest = await self._request_json(
-                "GET",
-                f"/contact/enrich/bulk/{enrichment_id}",
-                request_payload={"enrichment_id": str(enrichment_id)},
-                headers={"Authorization": f"Bearer {self._api_key}"},
-            )
-            latest.external_request_id = str(enrichment_id)
-            if latest.status in {"failed", "rate_limited", "timed_out"}:
-                return to_find_result(latest)
-            body = latest.response_payload
-            job_status = body.get("status") if isinstance(body, dict) else None
-            if job_status == "FINISHED":
-                return to_find_result(latest, emails=_fullenrich_emails(body))
-            if job_status in _TERMINAL_FAILURE:
-                latest.status = "failed"
-                latest.error_code = str(job_status).lower()
-                latest.error_message = f"FullEnrich job ended with {job_status}"
-                return to_find_result(latest)
-            await self._sleep(self._poll_interval_seconds)
-            elapsed += self._poll_interval_seconds
-        latest.status = "timed_out"
-        latest.error_code = "poll_timeout"
-        latest.error_message = "FullEnrich enrichment timed out"
-        latest.external_request_id = str(enrichment_id)
-        return to_find_result(latest)
+        if (
+            result.http_status is not None
+            and result.http_status < 400
+            and enrichment_id
+        ):
+            result.status = "waiting"
+            result.external_request_id = str(enrichment_id)
+        elif result.http_status is not None and result.http_status < 400:
+            result.status = "failed"
+            result.error_code = "missing_enrichment_id"
+            result.error_message = "FullEnrich did not return an enrichment ID"
+        return result
+
+    def verify_webhook(self, raw_body: bytes, signature: str) -> bool:
+        expected = hmac.new(
+            self._api_key.encode("utf-8"), raw_body, hashlib.sha1
+        ).hexdigest()
+        return bool(signature) and hmac.compare_digest(expected, signature)
+
+    @staticmethod
+    def emails_from_record(record: Any) -> list[str]:
+        return _fullenrich_emails({"data": [record]})
 
 
 def _fullenrich_emails(payload: Any) -> list[str]:

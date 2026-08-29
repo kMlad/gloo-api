@@ -20,9 +20,11 @@ EmailValidatorName = Literal["millionverifier"]
 FilterOperator = Literal["eq", "contains", "is_empty", "is_not_empty"]
 FilterLogic = Literal["and", "or"]
 CellValue = str | bool | None
-SheriffRunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
+SheriffRunStatus = Literal[
+    "queued", "running", "waiting", "succeeded", "partial", "failed"
+]
 SheriffRunItemStatus = Literal[
-    "queued", "running", "succeeded", "not_found", "failed", "skipped"
+    "queued", "running", "waiting", "succeeded", "not_found", "failed", "skipped"
 ]
 COMPUTED_COLUMN_TYPES = {"sheriff", "email_enrichment", "email_validation"}
 

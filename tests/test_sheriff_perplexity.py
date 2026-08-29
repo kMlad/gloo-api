@@ -5,7 +5,11 @@ from app.tables.sheriff.prompts import (
     RESEARCH_INSTRUCTIONS,
     RESEARCH_INSTRUCTIONS_NO_SEARCH,
 )
-from app.tables.sheriff.protocol import SheriffOutputField
+from app.tables.sheriff.protocol import (
+    SheriffOutputField,
+    SheriffResearchResult,
+    SheriffSource,
+)
 
 
 def test_parse_agent_usage_splits_model_and_tool_costs() -> None:
@@ -194,3 +198,22 @@ async def test_research_omits_web_search_tool_when_disabled() -> None:
     assert "tools" not in client.responses.kwargs
     assert client.responses.kwargs["max_steps"] == 1
     assert client.responses.kwargs["instructions"] == RESEARCH_INSTRUCTIONS_NO_SEARCH
+
+
+def test_sheriff_source_coerces_null_title() -> None:
+    source = SheriffSource.model_validate(
+        {"url": "https://example.com", "title": None}
+    )
+    assert source.title == ""
+
+
+def test_research_result_accepts_null_source_title() -> None:
+    result = SheriffResearchResult.model_validate(
+        {
+            "output": {"first_name": "Ada"},
+            "confidence": "low",
+            "confidence_reason": "",
+            "sources": [{"url": "https://example.com", "title": None}],
+        }
+    )
+    assert result.sources[0].title == ""

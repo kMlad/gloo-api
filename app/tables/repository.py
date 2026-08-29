@@ -408,6 +408,34 @@ class TableRepository:
         )
         return response.data
 
+    async def get_email_enrichment_run_item(
+        self, item_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("table_email_enrichment_run_items")
+            .select("*")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def list_active_email_enrichment_row_ids(
+        self, column_id: str, row_ids: list[str]
+    ) -> set[str]:
+        active: set[str] = set()
+        for group in chunks(row_ids, _ROW_LIST_CHUNK):
+            response = await (
+                self._db.table("table_email_enrichment_run_items")
+                .select("row_id")
+                .eq("column_id", column_id)
+                .in_("row_id", group)
+                .in_("status", ["queued", "running", "waiting"])
+                .execute()
+            )
+            active.update(str(item["row_id"]) for item in response.data)
+        return active
+
     async def update_email_enrichment_run_item(
         self, item_id: str, values: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -420,6 +448,18 @@ class TableRepository:
         )
         return response.data[0] if response.data else None
 
+    async def claim_waiting_email_enrichment_run_item(
+        self, item_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("table_email_enrichment_run_items")
+            .update({"status": "running", "updated_at": to_iso(utc_now())})
+            .eq("id", item_id)
+            .eq("status", "waiting")
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
     async def insert_email_enrichment_attempts(
         self, attempts: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -427,6 +467,56 @@ class TableRepository:
             return []
         response = await (
             self._db.table("table_email_enrichment_attempts").insert(attempts).execute()
+        )
+        return response.data
+
+    async def update_email_enrichment_attempt(
+        self, attempt_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = {"updated_at": to_iso(utc_now()), **values}
+        response = await (
+            self._db.table("table_email_enrichment_attempts")
+            .update(payload)
+            .eq("id", attempt_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def get_email_enrichment_attempt(
+        self, item_id: str, provider: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("table_email_enrichment_attempts")
+            .select("*")
+            .eq("item_id", item_id)
+            .eq("provider", provider)
+            .order("sequence", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def list_email_enrichment_attempts_for_item(
+        self, item_id: str
+    ) -> list[dict[str, Any]]:
+        response = await (
+            self._db.table("table_email_enrichment_attempts")
+            .select("*")
+            .eq("item_id", item_id)
+            .order("sequence")
+            .execute()
+        )
+        return response.data
+
+    async def list_email_enrichment_attempts_by_external_id(
+        self, external_request_id: str
+    ) -> list[dict[str, Any]]:
+        response = await (
+            self._db.table("table_email_enrichment_attempts")
+            .select("*")
+            .eq("provider", "fullenrich")
+            .eq("external_request_id", external_request_id)
+            .execute()
         )
         return response.data
 

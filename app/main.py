@@ -15,6 +15,7 @@ from app.phone_enrichment.providers import (
     LeadMagicClient,
     ProspeoClient,
 )
+from app.phone_enrichment.providers.base import FixedWindowRateLimiter
 from app.phone_enrichment.repository import EnrichmentRepository
 from app.phone_enrichment.routes import (
     internal_router as phone_enrichment_router,
@@ -35,6 +36,7 @@ from app.tables.email_enrichment import (
     MillionVerifierClient,
     ProspeoEmailClient,
 )
+from app.tables.email_enrichment.routes import router as email_enrichment_webhook_router
 from app.tables.sheriff.perplexity import PerplexitySheriffAgent
 from app.tables.repository import TableRepository
 from app.tables.routes import router as tables_router
@@ -117,6 +119,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "max_retries": env.phone_provider_max_retries,
         "concurrency": env.email_enrichment_concurrency,
     }
+    fullenrich_rate_limiter = FixedWindowRateLimiter(max_calls=55)
+    fullenrich_email = FullEnrichEmailClient(
+        fullenrich_http,
+        env.fullenrich_api_key.get_secret_value(),
+        webhook_url=(
+            env.public_api_base_url.rstrip("/")
+            + "/api/v1/email-enrichments/webhooks/fullenrich"
+        ),
+        request_limiter=fullenrich_rate_limiter.acquire,
+        **email_provider_options,
+    )
     email_finders = {
         "leadmagic": LeadMagicEmailClient(
             leadmagic_http,
@@ -126,12 +139,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "prospeo": ProspeoEmailClient(
             prospeo_http,
             env.prospeo_api_key.get_secret_value(),
-            **email_provider_options,
-        ),
-        "fullenrich": FullEnrichEmailClient(
-            fullenrich_http,
-            env.fullenrich_api_key.get_secret_value(),
-            poll_timeout_seconds=env.email_enrichment_fullenrich_poll_seconds,
             **email_provider_options,
         ),
     }
@@ -160,6 +167,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sheriff_concurrency=env.sheriff_concurrency,
         email_finders=email_finders,
         email_validator=email_validator,
+        fullenrich_email=fullenrich_email,
         email_concurrency=env.email_enrichment_concurrency,
     )
     app.state.smartlead = SmartLeadClient(
@@ -192,6 +200,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         FullEnrichClient(
             fullenrich_http,
             env.fullenrich_api_key.get_secret_value(),
+            request_limiter=fullenrich_rate_limiter.acquire,
             **provider_options,
         ),
         public_api_base_url=env.public_api_base_url,
@@ -241,6 +250,7 @@ def create_app(
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)
     application.include_router(phone_enrichment_webhook_router)
+    application.include_router(email_enrichment_webhook_router)
     application.include_router(users_router)
     application.include_router(tables_router)
     return application

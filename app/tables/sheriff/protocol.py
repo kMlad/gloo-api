@@ -37,6 +37,11 @@ class SheriffSource(BaseModel):
     url: str
     title: str = ""
 
+    @field_validator("title", mode="before")
+    @classmethod
+    def coerce_title(cls, value: object) -> object:
+        return "" if value is None else value
+
 
 class PerplexityUsage(BaseModel):
     model: str
