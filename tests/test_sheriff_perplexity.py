@@ -1,6 +1,10 @@
 import pytest
 
-from app.tables.sheriff.perplexity import PerplexitySheriffAgent, parse_perplexity_usage
+from app.tables.sheriff.perplexity import (
+    PerplexitySheriffAgent,
+    _search_sources,
+    parse_perplexity_usage,
+)
 from app.tables.sheriff.prompts import (
     RESEARCH_INSTRUCTIONS,
     RESEARCH_INSTRUCTIONS_NO_SEARCH,
@@ -161,9 +165,13 @@ async def test_research_uses_requested_model_and_web_search_tool() -> None:
     )
     assert client.responses.kwargs is not None
     assert client.responses.kwargs["model"] == "openai/gpt-5.4"
-    assert client.responses.kwargs["tools"] == [{"type": "web_search"}]
-    assert client.responses.kwargs["max_steps"] == 4
+    assert client.responses.kwargs["tools"] == [
+        {"type": "web_search", "search_context_size": "medium"},
+        {"type": "fetch_url"},
+    ]
+    assert client.responses.kwargs["max_steps"] == 5
     assert client.responses.kwargs["instructions"] == RESEARCH_INSTRUCTIONS
+    assert "fetch_url on that link first" in client.responses.kwargs["instructions"]
 
 
 @pytest.mark.asyncio
@@ -177,8 +185,11 @@ async def test_research_caps_web_search_calls_when_limit_is_set() -> None:
         web_search_limit=2,
     )
     assert client.responses.kwargs is not None
-    assert client.responses.kwargs["tools"] == [{"type": "web_search"}]
-    assert client.responses.kwargs["max_steps"] == 3
+    assert client.responses.kwargs["tools"] == [
+        {"type": "web_search", "search_context_size": "medium"},
+        {"type": "fetch_url"},
+    ]
+    assert client.responses.kwargs["max_steps"] == 4
     assert "at most 2 web_search calls" in client.responses.kwargs["instructions"]
 
 
@@ -198,6 +209,51 @@ async def test_research_omits_web_search_tool_when_disabled() -> None:
     assert "tools" not in client.responses.kwargs
     assert client.responses.kwargs["max_steps"] == 1
     assert client.responses.kwargs["instructions"] == RESEARCH_INSTRUCTIONS_NO_SEARCH
+
+
+@pytest.mark.asyncio
+async def test_research_uses_configured_search_context_size() -> None:
+    client = _FakeClient()
+    agent = PerplexitySheriffAgent(
+        client, model="openai/gpt-5.4-mini", search_context_size="low"
+    )
+    await agent.research(
+        prompt="Find Ada",
+        outputs=[SheriffOutputField(key="first_name", type="text")],
+    )
+    assert client.responses.kwargs is not None
+    assert client.responses.kwargs["tools"][0]["search_context_size"] == "low"
+
+
+def test_search_sources_includes_fetch_url_results() -> None:
+    sources = _search_sources(
+        {
+            "output": [
+                {
+                    "type": "fetch_url_results",
+                    "contents": [
+                        {
+                            "url": "https://example.com/report",
+                            "title": "Example Report",
+                        }
+                    ],
+                },
+                {
+                    "type": "search_results",
+                    "results": [
+                        {
+                            "url": "https://example.com/search",
+                            "title": "Search Hit",
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+    assert sources == [
+        SheriffSource(url="https://example.com/report", title="Example Report"),
+        SheriffSource(url="https://example.com/search", title="Search Hit"),
+    ]
 
 
 def test_sheriff_source_coerces_null_title() -> None:

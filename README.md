@@ -203,7 +203,7 @@ Create a sheriff column with a user prompt and output fields (`text` or
 `boolean`, max 10). Expanding the prompt is optional; if `enhanced_prompt` is
 omitted, runs interpolate `user_prompt`. Optional `web_search` (default
 `true`), `web_search_limit` (1–20 web_search calls per row; omit for the
-default 4-step loop), and `model` (OpenAI models only, default
+default 5-step loop), and `model` (OpenAI models only, default
 `openai/gpt-5.4-mini`) are stored on the column and used for runs. List
 allowed models with `GET /api/v1/tables/{table_id}/sheriff/options`. The
 response is the full table, including auto-created child columns
@@ -256,13 +256,16 @@ can. A succeeded cell looks like:
 ```
 
 Sheriff uses the Perplexity Agent API with `PERPLEXITY_API_KEY`. Runs use the
-column's `model` and `web_search` flag (`web_search` adds the Perplexity
-`web_search` tool). Optional `web_search_limit` caps how many times that tool
-may be called; `max_steps` is set to `limit + 1` so the model still has a
-final answer turn. Perplexity Pro/Max app plans do not include API access.
+column's `model` and `web_search` flag (`web_search` adds Perplexity
+`web_search` and `fetch_url`). If the prompt includes a URL, the agent fetches
+that page first and searches only if the page is not enough. Optional
+`web_search_limit` caps how many times `web_search` may be called; `max_steps`
+is set to `limit + 2` so the model still has a fetch turn and a final answer
+turn. Perplexity Pro/Max app plans do not include API access.
 Expand/run without a key returns 503. Optional tuning: `SHERIFF_MODEL`
 (default `openai/gpt-5.4-mini`, used for prompt expand), `SHERIFF_TIMEOUT_SECONDS`,
-`SHERIFF_CONCURRENCY`.
+`SHERIFF_CONCURRENCY`, `SHERIFF_SEARCH_CONTEXT_SIZE` (`low` / `medium` /
+`high`, default `medium`).
 
 Create an email enrichment column after mapping first name, last name, LinkedIn
 URL, company name, and company domain/website columns. Providers default to

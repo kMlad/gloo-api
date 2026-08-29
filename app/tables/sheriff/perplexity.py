@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from perplexity import AsyncPerplexity
 
@@ -22,7 +22,10 @@ from app.tables.sheriff.protocol import (
 logger = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
-_DEFAULT_SEARCH_MAX_STEPS = 4
+_DEFAULT_SEARCH_MAX_STEPS = 5
+_FETCH_STEP = 1
+_ANSWER_STEP = 1
+SearchContextSize = Literal["low", "medium", "high"]
 
 
 class PerplexitySheriffAgent:
@@ -31,9 +34,11 @@ class PerplexitySheriffAgent:
         client: AsyncPerplexity,
         *,
         model: str,
+        search_context_size: SearchContextSize = "medium",
     ) -> None:
         self._client = client
         self._model = model
+        self._search_context_size = search_context_size
 
     async def expand(
         self, *, goal: str, column_names: list[str]
@@ -137,7 +142,13 @@ class PerplexitySheriffAgent:
             },
         }
         if search:
-            kwargs["tools"] = [{"type": "web_search"}]
+            kwargs["tools"] = [
+                {
+                    "type": "web_search",
+                    "search_context_size": self._search_context_size,
+                },
+                {"type": "fetch_url"},
+            ]
         response = await self._client.responses.create(**kwargs)
         dumped = _dump(response)
         if dumped.get("status") not in {None, "completed"}:
@@ -169,7 +180,7 @@ def _research_max_steps(
         return 1
     if web_search_limit is None:
         return _DEFAULT_SEARCH_MAX_STEPS
-    return web_search_limit + 1
+    return web_search_limit + _FETCH_STEP + _ANSWER_STEP
 
 
 def _dump(value: Any) -> dict[str, Any]:
@@ -198,37 +209,35 @@ def _output_text(dumped: dict[str, Any]) -> str:
 def _search_sources(dumped: dict[str, Any]) -> list[SheriffSource]:
     sources: list[SheriffSource] = []
     seen: set[str] = set()
+
+    def append(entry: object) -> None:
+        if not isinstance(entry, dict):
+            return
+        url = str(entry.get("url") or "").strip()
+        if not url or url in seen:
+            return
+        seen.add(url)
+        sources.append(SheriffSource(url=url, title=str(entry.get("title") or "")))
+
     for item in dumped.get("output") or []:
         if not isinstance(item, dict):
             continue
-        results = item.get("results") if item.get("type") == "search_results" else None
-        if isinstance(results, list):
-            for result in results:
-                if not isinstance(result, dict):
-                    continue
-                url = str(result.get("url") or "").strip()
-                if not url or url in seen:
-                    continue
-                seen.add(url)
-                sources.append(
-                    SheriffSource(url=url, title=str(result.get("title") or ""))
-                )
+        if item.get("type") == "search_results":
+            results = item.get("results")
+            if isinstance(results, list):
+                for result in results:
+                    append(result)
+        if item.get("type") == "fetch_url_results":
+            contents = item.get("contents")
+            if isinstance(contents, list):
+                for content in contents:
+                    append(content)
         if item.get("type") == "message":
             for part in item.get("content") or []:
                 if not isinstance(part, dict):
                     continue
                 for annotation in part.get("annotations") or []:
-                    if not isinstance(annotation, dict):
-                        continue
-                    url = str(annotation.get("url") or "").strip()
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    sources.append(
-                        SheriffSource(
-                            url=url, title=str(annotation.get("title") or "")
-                        )
-                    )
+                    append(annotation)
     return sources
 
 

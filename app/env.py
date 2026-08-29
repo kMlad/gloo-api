@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -57,6 +57,7 @@ class Env(BaseSettings):
     sheriff_model: str = "openai/gpt-5.4-mini"
     sheriff_timeout_seconds: float = Field(default=60.0, gt=0)
     sheriff_concurrency: int = Field(default=3, ge=1, le=20)
+    sheriff_search_context_size: Literal["low", "medium", "high"] = "medium"
     icypeas_api_key: SecretStr | None = None
     kitt_api_key: SecretStr | None = None
     millionverifier_api_key: SecretStr | None = None

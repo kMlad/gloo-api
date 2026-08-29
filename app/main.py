@@ -93,6 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sheriff_agent = PerplexitySheriffAgent(
             perplexity_client,
             model=env.sheriff_model,
+            search_context_size=env.sheriff_search_context_size,
         )
     email_timeout = httpx.Timeout(
         connect=5.0,
