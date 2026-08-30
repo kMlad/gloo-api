@@ -4,6 +4,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretStr
+from supabase_auth.types import User, UserResponse
 
 from app.dependencies import (
     get_phone_enrichment_service,
@@ -12,6 +13,8 @@ from app.dependencies import (
 )
 from app.env import Env, get_env
 from app.main import create_app
+from app.supabase_client import get_supabase
+from supabase import AuthApiError
 
 
 class LeadRepositoryStub:
@@ -110,11 +113,8 @@ class SmartLeadCampaignStub:
         return {"id": campaign_id, "name": "Campaign"}
 
 
-@pytest.mark.asyncio
-async def test_internal_routes_require_a_valid_bearer_token() -> None:
-    internal_token = "test-internal-token-with-32-characters"
-    app = create_app(use_lifespan=False)
-    app.dependency_overrides[get_env] = lambda: Env(
+def _env(*, internal_token: str = "test-internal-token-with-32-characters") -> Env:
+    return Env(
         supabase_url="http://127.0.0.1:54321",
         supabase_secret_key=SecretStr("secret"),
         smartlead_api_key=SecretStr("smartlead"),
@@ -128,31 +128,67 @@ async def test_internal_routes_require_a_valid_bearer_token() -> None:
             "test-fullenrich-webhook-token-32-characters"
         ),
     )
+
+
+def _user() -> User:
+    now = datetime(2026, 8, 16, tzinfo=UTC)
+    return User(
+        id=str(uuid4()),
+        app_metadata={"provider": "email", "providers": ["email"]},
+        user_metadata={},
+        aud="authenticated",
+        email="person@example.com",
+        created_at=now,
+    )
+
+
+class AuthStub:
+    def __init__(
+        self, *, current_user: User | None, get_user_error: AuthApiError | None = None
+    ) -> None:
+        self.current_user = current_user
+        self.get_user_error = get_user_error
+
+    async def get_user(self, jwt: str | None = None) -> UserResponse | None:
+        if self.get_user_error is not None:
+            raise self.get_user_error
+        if self.current_user is None:
+            return None
+        return UserResponse(user=self.current_user)
+
+
+class SupabaseStub:
+    def __init__(self, auth: AuthStub) -> None:
+        self.auth = auth
+
+
+@pytest.mark.asyncio
+async def test_lead_routes_require_a_valid_user_jwt() -> None:
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
     repository = LeadRepositoryStub()
+    supabase = SupabaseStub(AuthStub(current_user=None))
     app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_supabase] = lambda: supabase
+    headers = {"Authorization": "Bearer user-jwt"}
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver"
     ) as client:
         assert (await client.get("/api/v1/leads")).status_code == 401
-        invalid_response = await client.get(
-            "/api/v1/leads", headers={"Authorization": "Bearer incorrect"}
-        )
+        supabase.auth.get_user_error = AuthApiError("invalid JWT", 401, "bad_jwt")
+        invalid_response = await client.get("/api/v1/leads", headers=headers)
         assert invalid_response.status_code == 401
 
-        response = await client.get(
-            "/api/v1/leads", headers={"Authorization": f"Bearer {internal_token}"}
-        )
+        supabase.auth.get_user_error = None
+        supabase.auth.current_user = _user()
+        response = await client.get("/api/v1/leads", headers=headers)
         assert response.status_code == 200
         assert response.json()["items"][0]["company_name"] == "Acme"
-        filtered = await client.get(
-            "/api/v1/leads?reply_type=ooo",
-            headers={"Authorization": f"Bearer {internal_token}"},
-        )
+        filtered = await client.get("/api/v1/leads?reply_type=ooo", headers=headers)
         invalid_filter = await client.get(
-            "/api/v1/leads?reply_type=negative",
-            headers={"Authorization": f"Bearer {internal_token}"},
+            "/api/v1/leads?reply_type=negative", headers=headers
         )
 
     assert filtered.status_code == 200
@@ -166,20 +202,7 @@ async def test_phone_enrichment_route_requires_auth_and_idempotency_key() -> Non
     internal_token = "test-internal-token-with-32-characters"
     service = PhoneEnrichmentServiceStub()
     app = create_app(use_lifespan=False)
-    app.dependency_overrides[get_env] = lambda: Env(
-        supabase_url="http://127.0.0.1:54321",
-        supabase_secret_key=SecretStr("secret"),
-        smartlead_api_key=SecretStr("smartlead"),
-        leadmagic_api_key=SecretStr("leadmagic"),
-        prospeo_api_key=SecretStr("prospeo"),
-        airscale_api_key=SecretStr("airscale"),
-        fullenrich_api_key=SecretStr("fullenrich"),
-        internal_api_token=SecretStr(internal_token),
-        public_api_base_url="https://api.example.com",
-        fullenrich_webhook_token=SecretStr(
-            "test-fullenrich-webhook-token-32-characters"
-        ),
-    )
+    app.dependency_overrides[get_env] = lambda: _env(internal_token=internal_token)
     app.dependency_overrides[get_phone_enrichment_service] = lambda: service
     headers = {"Authorization": f"Bearer {internal_token}"}
 
@@ -209,20 +232,7 @@ async def test_campaign_routes_persist_reply_type_configuration() -> None:
     internal_token = "test-internal-token-with-32-characters"
     repository = CampaignRepositoryStub()
     app = create_app(use_lifespan=False)
-    app.dependency_overrides[get_env] = lambda: Env(
-        supabase_url="http://127.0.0.1:54321",
-        supabase_secret_key=SecretStr("secret"),
-        smartlead_api_key=SecretStr("smartlead"),
-        leadmagic_api_key=SecretStr("leadmagic"),
-        prospeo_api_key=SecretStr("prospeo"),
-        airscale_api_key=SecretStr("airscale"),
-        fullenrich_api_key=SecretStr("fullenrich"),
-        internal_api_token=SecretStr(internal_token),
-        public_api_base_url="https://api.example.com",
-        fullenrich_webhook_token=SecretStr(
-            "test-fullenrich-webhook-token-32-characters"
-        ),
-    )
+    app.dependency_overrides[get_env] = lambda: _env(internal_token=internal_token)
     app.dependency_overrides[get_repository] = lambda: repository
     app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
     headers = {"Authorization": f"Bearer {internal_token}"}

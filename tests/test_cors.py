@@ -4,6 +4,7 @@ from pydantic import SecretStr
 
 from app.env import Env, _parse_cors_allowed_origins
 from app.main import create_app
+from app.supabase_client import get_supabase
 
 LOCAL_ORIGIN = "http://localhost:5173"
 
@@ -44,6 +45,7 @@ async def test_cors_preflight_allows_configured_origin() -> None:
         use_lifespan=False,
         cors_allowed_origins=[LOCAL_ORIGIN],
     )
+    app.dependency_overrides[get_supabase] = lambda: object()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver"

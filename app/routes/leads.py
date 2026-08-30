@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.auth import require_internal_token
+from app.auth import require_authenticated_user
 from app.dependencies import get_repository
 from app.models import LeadDetailResponse, LeadListResponse, ReplyType
 from app.repositories import Repository
@@ -11,7 +11,7 @@ from app.repositories import Repository
 router = APIRouter(
     prefix="/api/v1/leads",
     tags=["leads"],
-    dependencies=[Depends(require_internal_token)],
+    dependencies=[Depends(require_authenticated_user)],
 )
 
 RepositoryDependency = Annotated[Repository, Depends(get_repository)]

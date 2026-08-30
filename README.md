@@ -34,13 +34,13 @@ supabase db reset
 uv run fastapi dev
 ```
 
-All integration and lead endpoints require:
+Integration endpoints (SmartLead imports and phone enrichment) require:
 
 ```text
 Authorization: Bearer <INTERNAL_API_TOKEN>
 ```
 
-User invite endpoints and table (workbook) endpoints require a Supabase user
+User invite, lead, and table (workbook) endpoints require a Supabase user
 access token:
 
 ```text
@@ -74,7 +74,7 @@ new campaigns default to positive replies only. An import may instead specify
 `reply_time_to`. Timestamps must be timezone-aware ISO 8601 values. Imports over
 the configured conversation limit are rejected before reply histories are read.
 
-List imported leads with `GET /api/v1/leads`, or use
+List imported leads with `GET /api/v1/leads` (user access token), or use
 `GET /api/v1/leads?reply_type=ooo` to select currently OOO leads for phone
 enrichment. Retrieve complete canonical,
 campaign-specific, custom-property, and reply data with
