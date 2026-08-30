@@ -108,6 +108,23 @@ async def test_get_detail_returns_none_when_lead_is_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_conversation_is_not_marked_refreshed() -> None:
+    repository = FakeLeadRepository(
+        lead={"id": "lead-1", "email": "lead@example.com", "chat_refreshed_at": None},
+        conversations=[],
+    )
+    smartlead = FakeSmartLead()
+    service = LeadService(repository, smartlead, chat_refresh_ttl_seconds=3600)
+
+    detail = await service.get_detail("lead-1")
+
+    assert detail["conversations"] == []
+    assert smartlead.calls == []
+    assert repository.mark_calls == 0
+    assert detail["lead"]["chat_refreshed_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_stale_cache_refreshes_inbound_and_outbound_messages() -> None:
     repository = FakeLeadRepository(
         lead={"id": "lead-1", "email": "lead@example.com", "chat_refreshed_at": None},

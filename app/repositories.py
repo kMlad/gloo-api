@@ -237,6 +237,73 @@ class Repository:
         )
         return response.data[0]
 
+    async def upsert_lead_conversation(
+        self,
+        *,
+        email: str,
+        email_normalized: str,
+        observed_at: str,
+        typed_properties: dict[str, Any],
+        properties: dict[str, Any],
+        custom_properties: dict[str, Any],
+        conversation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Upsert a SmartLead lead and its conversation in one transaction."""
+        existing_response = await (
+            self._db.table("leads")
+            .select("*")
+            .eq("email_normalized", email_normalized)
+            .limit(1)
+            .execute()
+        )
+        existing = existing_response.data[0] if existing_response.data else None
+
+        if existing is None:
+            lead_values = {
+                "email": email,
+                "email_normalized": email_normalized,
+                **typed_properties,
+                "properties": properties,
+                "custom_properties": custom_properties,
+                "source_observed_at": observed_at,
+            }
+        else:
+            incoming_is_newer = parse_datetime(observed_at) >= parse_datetime(
+                existing["source_observed_at"]
+            )
+            if incoming_is_newer:
+                lead_values = {
+                    **existing,
+                    "email": email,
+                    **{
+                        key: value
+                        for key, value in typed_properties.items()
+                        if value is not None and value != ""
+                    },
+                    "properties": merge_non_empty(existing["properties"], properties),
+                    "custom_properties": merge_non_empty(
+                        existing["custom_properties"], custom_properties
+                    ),
+                    "source_observed_at": observed_at,
+                }
+            else:
+                lead_values = {
+                    **existing,
+                    "properties": merge_non_empty(properties, existing["properties"]),
+                    "custom_properties": merge_non_empty(
+                        custom_properties, existing["custom_properties"]
+                    ),
+                }
+
+        response = await self._db.rpc(
+            "upsert_smartlead_lead_conversation",
+            {
+                "p_lead": lead_values,
+                "p_conversation": conversation,
+            },
+        ).execute()
+        return response.data
+
     async def upsert_reply(self, values: dict[str, Any]) -> dict[str, Any]:
         response = await (
             self._db.table("smartlead_replies")

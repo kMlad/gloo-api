@@ -108,6 +108,20 @@ class FakeRepository:
         self.conversations[key] = conversation
         return deepcopy(conversation)
 
+    async def upsert_lead_conversation(self, *, conversation, **lead_values):
+        leads_snapshot = deepcopy(self.leads)
+        conversations_snapshot = deepcopy(self.conversations)
+        try:
+            lead = await self.upsert_lead(**lead_values)
+            stored_conversation = await self.upsert_conversation(
+                {"lead_id": lead["id"], **conversation}
+            )
+        except Exception:
+            self.leads = leads_snapshot
+            self.conversations = conversations_snapshot
+            raise
+        return {"lead": lead, "conversation": stored_conversation}
+
     async def upsert_reply(self, values):
         reply = {"id": str(uuid4()), **values}
         if values["dedupe_key"] in self.replies:
@@ -208,6 +222,23 @@ class FakeSmartLead:
                 }
             ]
         }
+
+
+class UnknownCategorySmartLead(FakeSmartLead):
+    async def get_inbox_page(self, *, fetch_message_history, offset, **kwargs):
+        page = await super().get_inbox_page(
+            fetch_message_history=fetch_message_history,
+            offset=offset,
+            **kwargs,
+        )
+        if fetch_message_history and page.get("messages"):
+            page["messages"][0]["category"] = {"id": 999, "name": "Unknown"}
+        return page
+
+
+class ConversationFailureRepository(FakeRepository):
+    async def upsert_conversation(self, values):
+        raise RuntimeError("conversation write failed")
 
 
 class MultiCampaignSmartLead(FakeSmartLead):
@@ -335,6 +366,36 @@ async def test_import_accepts_current_flat_master_inbox_shape() -> None:
     assert reply["smartlead_message_id"] == "reply-1"
     assert reply["sent_from"] == "lead@example.com"
     assert reply["sent_to"] == "sender@example.com"
+
+
+@pytest.mark.asyncio
+async def test_invalid_category_does_not_leave_an_orphaned_lead() -> None:
+    repository = FakeRepository()
+    service = ImportService(
+        repository, UnknownCategorySmartLead(), max_conversations=1000
+    )
+
+    result = await service.run(ImportRequest())
+
+    assert result["status"] == "failed"
+    assert repository.leads == {}
+    assert repository.conversations == {}
+    assert result["errors"][0]["message"] == (
+        "Inbox item has no recognized reply category"
+    )
+
+
+@pytest.mark.asyncio
+async def test_conversation_failure_rolls_back_lead_write() -> None:
+    repository = ConversationFailureRepository()
+    service = ImportService(repository, FakeSmartLead(), max_conversations=1000)
+
+    result = await service.run(ImportRequest())
+
+    assert result["status"] == "failed"
+    assert repository.leads == {}
+    assert repository.conversations == {}
+    assert result["errors"][0]["message"] == "conversation write failed"
 
 
 @pytest.mark.asyncio

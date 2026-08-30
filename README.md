@@ -74,6 +74,26 @@ new campaigns default to positive replies only. An import may instead specify
 `reply_time_to`. Timestamps must be timezone-aware ISO 8601 values. Imports over
 the configured conversation limit are rejected before reply histories are read.
 
+Imports atomically persist each lead with its SmartLead conversation. To repair
+legacy leads whose conversation row was not written, rerun the import with the
+affected campaigns and reply-time range. The upserts are idempotent, and a
+successful import invalidates the lead's chat cache so the next detail request
+loads the complete SmartLead history.
+
+For a historical repair, first make sure each campaign's `reply_types` includes
+every historical category that must be retained, then run an unbounded import
+after deploying the atomic-upsert migration and application change:
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/smartlead/imports \
+  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Date filters apply to SmartLead reply timestamps, not local lead creation dates,
+so a creation-date cutoff is not sufficient to repair an older reply batch.
+
 List imported leads with `GET /api/v1/leads` (user access token), or use
 `GET /api/v1/leads?reply_type=ooo` to select currently OOO leads for phone
 enrichment. Retrieve complete canonical, campaign-specific, custom-property,
@@ -385,5 +405,3 @@ cannot be patched; the boolean child can. A succeeded cell looks like:
 
 Runs without MillionVerifier return 503. Concurrency uses
 `EMAIL_ENRICHMENT_CONCURRENCY`.
-
-

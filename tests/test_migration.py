@@ -66,6 +66,31 @@ def test_campaign_reply_types_migration_is_additive_and_constrained() -> None:
     assert "drop column positive_category" not in migration
 
 
+def test_smartlead_lead_conversation_upsert_is_atomic_and_private() -> None:
+    migration = next(
+        Path("supabase/migrations").glob(
+            "*_atomic_smartlead_lead_conversation.sql"
+        )
+    ).read_text()
+
+    assert (
+        "create or replace function public.upsert_smartlead_lead_conversation"
+        in migration
+    )
+    assert "security invoker" in migration
+    assert "insert into public.leads" in migration
+    assert "insert into public.smartlead_conversations" in migration
+    assert "on conflict (email_normalized)" in migration
+    assert (
+        "on conflict (smartlead_campaign_id, smartlead_campaign_lead_map_id)"
+        in migration
+    )
+    assert "revoke execute on function" in migration
+    assert "from public, anon, authenticated" in migration
+    assert "grant execute on function" in migration
+    assert "to service_role" in migration
+
+
 def test_workbook_tables_migration_is_private_and_typed() -> None:
     migration = next(
         Path("supabase/migrations").glob("*_workbook_tables.sql")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,8 @@ from app.utils import (
     to_iso,
     utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ImportValidationError(Exception):
@@ -91,12 +94,18 @@ class LeadService:
             if conversation.get("smartlead_campaign_id") is not None
             and conversation.get("smartlead_lead_id") not in (None, "")
         ]
-        if targets:
-            results = await asyncio.gather(
-                *[self._fetch_and_store(conversation) for conversation in targets]
+        if not targets:
+            logger.warning(
+                "SmartLead chat refresh skipped because the lead has no usable "
+                "conversation metadata",
+                extra={"lead_id": lead_id},
             )
-            if not all(results):
-                return
+            return
+        results = await asyncio.gather(
+            *[self._fetch_and_store(conversation) for conversation in targets]
+        )
+        if not all(results):
+            return
         await self._repository.mark_chat_refreshed(lead_id)
 
     async def _fetch_and_store(self, conversation: dict[str, Any]) -> bool:
@@ -702,15 +711,6 @@ class ImportService:
                 lead_properties, ["linkedin_profile", "linkedin_url"]
             ),
         }
-        lead = await self._repository.upsert_lead(
-            email=email,
-            email_normalized=email_normalized,
-            observed_at=to_iso(observed_at),
-            typed_properties=typed_properties,
-            properties=lead_properties,
-            custom_properties=custom_properties,
-        )
-
         if not map_id:
             map_id = f"fallback:{campaign_id}:{email_normalized}"
         category = (
@@ -723,9 +723,14 @@ class ImportService:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Inbox item has no recognized reply category") from exc
         lead_external_id = detailed_lead.get("id") or inbox_lead.get("id")
-        conversation = await self._repository.upsert_conversation(
-            {
-                "lead_id": lead["id"],
+        persisted = await self._repository.upsert_lead_conversation(
+            email=email,
+            email_normalized=email_normalized,
+            observed_at=to_iso(observed_at),
+            typed_properties=typed_properties,
+            properties=lead_properties,
+            custom_properties=custom_properties,
+            conversation={
                 "smartlead_campaign_id": campaign_id,
                 "smartlead_campaign_lead_map_id": map_id,
                 "smartlead_lead_id": (
@@ -740,8 +745,10 @@ class ImportService:
                     "_campaign_record": detail_record,
                 },
                 "custom_properties": custom_properties,
-            }
+            },
         )
+        lead = persisted["lead"]
+        conversation = persisted["conversation"]
 
         for message in inbound_messages:
             message_id = message.get("id") or message.get("message_id")

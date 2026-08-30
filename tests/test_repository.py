@@ -29,6 +29,9 @@ class QueryStub:
     def range(self, *args, **kwargs):
         return self._record("range", *args, **kwargs)
 
+    def limit(self, *args, **kwargs):
+        return self._record("limit", *args, **kwargs)
+
     def in_(self, *args, **kwargs):
         return self._record("in", *args, **kwargs)
 
@@ -47,6 +50,10 @@ class DatabaseStub:
 
     def table(self, table):
         return QueryStub(table, self.responses[table].pop(0), self.calls)
+
+    def rpc(self, function, params):
+        self.calls.append((function, "rpc", (params,), {}))
+        return QueryStub(function, self.responses[function].pop(0), self.calls)
 
 
 @pytest.mark.asyncio
@@ -217,3 +224,39 @@ async def test_mark_chat_refreshed_updates_lead_timestamp() -> None:
     assert database.calls[0][1] == "update"
     assert "chat_refreshed_at" in database.calls[0][2][0]
     assert database.calls[1][1:] == ("eq", ("id", "lead-1"), {})
+
+
+@pytest.mark.asyncio
+async def test_lead_and_conversation_are_sent_to_atomic_rpc() -> None:
+    result = {
+        "lead": {"id": "lead-1", "email": "person@example.com"},
+        "conversation": {"id": "conversation-1", "smartlead_campaign_id": 10},
+    }
+    database = DatabaseStub(
+        {
+            "leads": [SimpleNamespace(data=[])],
+            "upsert_smartlead_lead_conversation": [SimpleNamespace(data=result)],
+        }
+    )
+
+    stored = await Repository(database).upsert_lead_conversation(
+        email="person@example.com",
+        email_normalized="person@example.com",
+        observed_at="2026-08-13T10:00:00Z",
+        typed_properties={"first_name": "Pat"},
+        properties={"id": 99},
+        custom_properties={},
+        conversation={
+            "smartlead_campaign_id": 10,
+            "smartlead_campaign_lead_map_id": "map-1",
+        },
+    )
+
+    assert stored == result
+    rpc_call = next(call for call in database.calls if call[1] == "rpc")
+    params = rpc_call[2][0]
+    assert params["p_lead"]["properties"] == {"id": 99}
+    assert params["p_conversation"] == {
+        "smartlead_campaign_id": 10,
+        "smartlead_campaign_lead_map_id": "map-1",
+    }
