@@ -381,3 +381,12 @@ class Repository:
             )
 
         return {"lead": lead_response.data[0], "conversations": conversations}
+
+    async def mark_chat_refreshed(self, lead_id: str) -> None:
+        now = to_iso(utc_now())
+        await (
+            self._db.table("leads")
+            .update({"chat_refreshed_at": now, "updated_at": now})
+            .eq("id", lead_id)
+            .execute()
+        )

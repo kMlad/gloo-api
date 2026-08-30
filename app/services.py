@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.models import ImportRequest, ReplyType
@@ -27,6 +28,122 @@ class ImportLimitExceeded(Exception):
     def __init__(self, run: dict[str, Any]) -> None:
         super().__init__("The import exceeds the configured conversation limit")
         self.run = run
+
+
+def _message_direction(message: dict[str, Any]) -> str:
+    direction = str(message.get("direction", "")).casefold()
+    if direction in {"inbound", "outbound"}:
+        return direction
+    message_type = str(message.get("type", "")).casefold()
+    if message_type in {"reply", "inbound"}:
+        return "inbound"
+    if message_type in {"sent", "outbound"}:
+        return "outbound"
+    return "inbound"
+
+
+def _message_body(message: dict[str, Any]) -> str:
+    return str(
+        message.get("body")
+        or message.get("email_body")
+        or message.get("reply_body")
+        or message.get("plain_text")
+        or message.get("text")
+        or ""
+    )
+
+
+class LeadService:
+    def __init__(
+        self,
+        repository: Repository,
+        smartlead: SmartLeadClient,
+        *,
+        chat_refresh_ttl_seconds: int,
+    ) -> None:
+        self._repository = repository
+        self._smartlead = smartlead
+        self._ttl = timedelta(seconds=chat_refresh_ttl_seconds)
+
+    async def get_detail(self, lead_id: str) -> dict[str, Any] | None:
+        detail = await self._repository.get_lead_detail(lead_id)
+        if detail is None:
+            return None
+        if self._is_stale(detail["lead"].get("chat_refreshed_at")):
+            await self._refresh_chat(lead_id, detail["conversations"])
+            detail = await self._repository.get_lead_detail(lead_id)
+        return detail
+
+    def _is_stale(self, chat_refreshed_at: Any) -> bool:
+        if self._ttl.total_seconds() == 0:
+            return True
+        if chat_refreshed_at in (None, ""):
+            return True
+        refreshed = parse_datetime(chat_refreshed_at)
+        return utc_now() - refreshed >= self._ttl
+
+    async def _refresh_chat(
+        self, lead_id: str, conversations: list[dict[str, Any]]
+    ) -> None:
+        targets = [
+            conversation
+            for conversation in conversations
+            if conversation.get("smartlead_campaign_id") is not None
+            and conversation.get("smartlead_lead_id") not in (None, "")
+        ]
+        if targets:
+            results = await asyncio.gather(
+                *[self._fetch_and_store(conversation) for conversation in targets]
+            )
+            if not all(results):
+                return
+        await self._repository.mark_chat_refreshed(lead_id)
+
+    async def _fetch_and_store(self, conversation: dict[str, Any]) -> bool:
+        try:
+            messages = await self._smartlead.get_lead_message_history(
+                campaign_id=int(conversation["smartlead_campaign_id"]),
+                lead_id=str(conversation["smartlead_lead_id"]),
+            )
+        except SmartLeadError:
+            return False
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            try:
+                await self._upsert_message(str(conversation["id"]), message)
+            except ValueError:
+                continue
+        return True
+
+    async def _upsert_message(
+        self, conversation_id: str, message: dict[str, Any]
+    ) -> None:
+        message_id = message.get("id") or message.get("message_id")
+        received_at = ImportService._message_received_at(message)
+        dedupe_key = ImportService._reply_dedupe_key(
+            conversation_id=conversation_id,
+            message=message,
+            received_at=received_at,
+        )
+        await self._repository.upsert_reply(
+            {
+                "conversation_id": conversation_id,
+                "smartlead_message_id": str(message_id) if message_id else None,
+                "dedupe_key": dedupe_key,
+                "subject": message.get("subject"),
+                "body": _message_body(message),
+                "sent_from": message.get("sent_from")
+                or message.get("from_email")
+                or message.get("from"),
+                "sent_to": message.get("sent_to")
+                or message.get("to_email")
+                or message.get("to"),
+                "received_at": to_iso(received_at),
+                "direction": _message_direction(message),
+                "message_properties": message,
+            }
+        )
 
 
 class CampaignService:
@@ -640,12 +757,7 @@ class ImportService:
                     "smartlead_message_id": str(message_id) if message_id else None,
                     "dedupe_key": dedupe_key,
                     "subject": message.get("subject"),
-                    "body": str(
-                        message.get("body")
-                        or message.get("email_body")
-                        or message.get("reply_body")
-                        or ""
-                    ),
+                    "body": _message_body(message),
                     "sent_from": message.get("sent_from")
                     or message.get("from_email")
                     or message.get("from"),

@@ -96,3 +96,70 @@ async def test_inbox_normalizes_data_wrapper_used_by_smartlead() -> None:
 
     assert page["messages"] == [{"email_lead_map_id": "map-1"}]
     assert "total_count" not in page
+
+
+@pytest.mark.asyncio
+async def test_lead_message_history_requests_plain_text_and_normalizes_wrappers() -> (
+    None
+):
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(
+            200,
+            json={
+                "history": [
+                    {"id": "msg-1", "direction": "outbound"},
+                    "ignored",
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = SmartLeadClient(http_client, "secret", max_retries=0)
+        messages = await client.get_lead_message_history(campaign_id=10, lead_id="99")
+
+    assert captured["url"].path == "/api/v1/campaigns/10/leads/99/message-history"
+    assert captured["url"].params["show_plain_text_response"] == "true"
+    assert captured["url"].params["api_key"] == "secret"
+    assert messages == [{"id": "msg-1", "direction": "outbound"}]
+
+
+@pytest.mark.asyncio
+async def test_lead_message_history_accepts_messages_wrapper() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"messages": [{"id": "msg-2", "direction": "inbound"}]},
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = SmartLeadClient(http_client, "secret", max_retries=0)
+        messages = await client.get_lead_message_history(campaign_id=10, lead_id="99")
+
+    assert messages == [{"id": "msg-2", "direction": "inbound"}]
+
+
+@pytest.mark.asyncio
+async def test_lead_message_history_accepts_data_wrapper() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "msg-3", "direction": "outbound"}]},
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = SmartLeadClient(http_client, "secret", max_retries=0)
+        messages = await client.get_lead_message_history(campaign_id=10, lead_id="99")
+
+    assert messages == [{"id": "msg-3", "direction": "outbound"}]

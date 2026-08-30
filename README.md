@@ -76,9 +76,10 @@ the configured conversation limit are rejected before reply histories are read.
 
 List imported leads with `GET /api/v1/leads` (user access token), or use
 `GET /api/v1/leads?reply_type=ooo` to select currently OOO leads for phone
-enrichment. Retrieve complete canonical,
-campaign-specific, custom-property, and reply data with
-`GET /api/v1/leads/{lead_id}`.
+enrichment. Retrieve complete canonical, campaign-specific, custom-property,
+and full SmartLead chat history (inbound and outbound) with
+`GET /api/v1/leads/{lead_id}`. Cached threads are refreshed from SmartLead
+when older than `SMARTLEAD_CHAT_REFRESH_TTL_SECONDS` (default 1 hour).
 
 ## Phone enrichment
 

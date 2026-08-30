@@ -157,6 +157,7 @@ class EnrichmentRepository:
                 self._db.table("smartlead_replies")
                 .select("id,conversation_id,body,received_at")
                 .in_("conversation_id", list(conversation_to_lead))
+                .eq("direction", "inbound")
                 .order("received_at", desc=True)
                 .execute()
             )

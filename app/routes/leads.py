@@ -4,9 +4,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import require_authenticated_user
-from app.dependencies import get_repository
+from app.dependencies import get_repository, get_smartlead_client
+from app.env import Env, get_env
 from app.models import LeadDetailResponse, LeadListResponse, ReplyType
 from app.repositories import Repository
+from app.services import LeadService
+from app.smartlead.client import SmartLeadClient
 
 router = APIRouter(
     prefix="/api/v1/leads",
@@ -15,6 +18,8 @@ router = APIRouter(
 )
 
 RepositoryDependency = Annotated[Repository, Depends(get_repository)]
+SmartLeadDependency = Annotated[SmartLeadClient, Depends(get_smartlead_client)]
+EnvDependency = Annotated[Env, Depends(get_env)]
 
 
 @router.get("", response_model=LeadListResponse)
@@ -31,8 +36,17 @@ async def list_leads(
 
 
 @router.get("/{lead_id}", response_model=LeadDetailResponse)
-async def get_lead(lead_id: UUID, repository: RepositoryDependency) -> dict:
-    result = await repository.get_lead_detail(str(lead_id))
+async def get_lead(
+    lead_id: UUID,
+    repository: RepositoryDependency,
+    smartlead: SmartLeadDependency,
+    env: EnvDependency,
+) -> dict:
+    result = await LeadService(
+        repository,
+        smartlead,
+        chat_refresh_ttl_seconds=env.smartlead_chat_refresh_ttl_seconds,
+    ).get_detail(str(lead_id))
     if result is None:
         raise HTTPException(status_code=404, detail="Lead not found")
     return result

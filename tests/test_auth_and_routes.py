@@ -20,6 +20,7 @@ from supabase import AuthApiError
 class LeadRepositoryStub:
     def __init__(self) -> None:
         self.reply_types: list[str | None] = []
+        self.detail_ids: list[str] = []
 
     async def list_leads(self, *, limit: int, offset: int, reply_type=None):
         self.reply_types.append(reply_type)
@@ -45,6 +46,43 @@ class LeadRepositoryStub:
             ],
             1,
         )
+
+    async def get_lead_detail(self, lead_id: str):
+        self.detail_ids.append(lead_id)
+        if lead_id == "00000000-0000-0000-0000-000000000000":
+            return None
+        return {
+            "lead": {
+                "id": lead_id,
+                "email": "person@example.com",
+                "chat_refreshed_at": datetime.now(UTC).isoformat(),
+            },
+            "conversations": [
+                {
+                    "id": str(uuid4()),
+                    "smartlead_campaign_id": 10,
+                    "smartlead_lead_id": "99",
+                    "replies": [
+                        {
+                            "id": str(uuid4()),
+                            "direction": "outbound",
+                            "body": "Cold email",
+                        },
+                        {
+                            "id": str(uuid4()),
+                            "direction": "inbound",
+                            "body": "Sounds good",
+                        },
+                    ],
+                }
+            ],
+        }
+
+    async def mark_chat_refreshed(self, lead_id: str) -> None:
+        return None
+
+    async def upsert_reply(self, values):
+        return values
 
 
 class PhoneEnrichmentServiceStub:
@@ -112,6 +150,9 @@ class SmartLeadCampaignStub:
     async def get_campaign(self, campaign_id):
         return {"id": campaign_id, "name": "Campaign"}
 
+    async def get_lead_message_history(self, *, campaign_id, lead_id):
+        return []
+
 
 def _env(*, internal_token: str = "test-internal-token-with-32-characters") -> Env:
     return Env(
@@ -169,6 +210,7 @@ async def test_lead_routes_require_a_valid_user_jwt() -> None:
     repository = LeadRepositoryStub()
     supabase = SupabaseStub(AuthStub(current_user=None))
     app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
     app.dependency_overrides[get_supabase] = lambda: supabase
     headers = {"Authorization": "Bearer user-jwt"}
 
@@ -190,11 +232,27 @@ async def test_lead_routes_require_a_valid_user_jwt() -> None:
         invalid_filter = await client.get(
             "/api/v1/leads?reply_type=negative", headers=headers
         )
+        lead_id = "11111111-1111-1111-1111-111111111111"
+        detail = await client.get(f"/api/v1/leads/{lead_id}", headers=headers)
+        missing = await client.get(
+            "/api/v1/leads/00000000-0000-0000-0000-000000000000", headers=headers
+        )
 
     assert filtered.status_code == 200
     assert filtered.json()["items"][0]["ooo_conversation_count"] == 1
     assert invalid_filter.status_code == 422
     assert repository.reply_types == [None, "ooo"]
+    assert detail.status_code == 200
+    assert detail.json()["lead"]["id"] == lead_id
+    assert [item["direction"] for item in detail.json()["conversations"][0]["replies"]] == [
+        "outbound",
+        "inbound",
+    ]
+    assert missing.status_code == 404
+    assert repository.detail_ids == [
+        lead_id,
+        "00000000-0000-0000-0000-000000000000",
+    ]
 
 
 @pytest.mark.asyncio

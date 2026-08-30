@@ -173,3 +173,26 @@ class SmartLeadClient:
         if not isinstance(payload, dict):
             raise SmartLeadError("SmartLead returned an invalid campaign lead page")
         return payload
+
+    async def get_lead_message_history(
+        self, *, campaign_id: int, lead_id: str
+    ) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            f"/campaigns/{campaign_id}/leads/{lead_id}/message-history",
+            params={"show_plain_text_response": "true"},
+        )
+        messages: Any
+        if isinstance(payload, list):
+            messages = payload
+        elif isinstance(payload, dict):
+            messages = payload.get("messages")
+            if not isinstance(messages, list):
+                messages = payload.get("data")
+            if not isinstance(messages, list):
+                messages = payload.get("history")
+        else:
+            messages = None
+        if not isinstance(messages, list):
+            raise SmartLeadError("SmartLead returned invalid lead message history")
+        return [item for item in messages if isinstance(item, dict)]

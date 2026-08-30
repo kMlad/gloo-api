@@ -236,3 +236,14 @@ def test_email_validation_columns_migration_is_private_and_typed() -> None:
         )
     assert "to anon" not in migration
     assert "to authenticated" not in migration
+
+
+def test_lead_chat_history_migration_is_additive_and_constrained() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_lead_chat_history.sql")
+    ).read_text()
+
+    assert "add column chat_refreshed_at timestamptz" in migration
+    assert "add column direction text not null default 'inbound'" in migration
+    assert "direction in ('inbound', 'outbound')" in migration
+    assert "drop column" not in migration

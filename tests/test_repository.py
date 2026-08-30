@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.phone_enrichment.repository import EnrichmentRepository
 from app.repositories import Repository
 from app.tables.repository import _ROW_LIST_CHUNK, TableRepository
 
@@ -30,6 +31,9 @@ class QueryStub:
 
     def in_(self, *args, **kwargs):
         return self._record("in", *args, **kwargs)
+
+    def update(self, *args, **kwargs):
+        return self._record("update", *args, **kwargs)
 
     async def execute(self):
         self.calls.append((self.table, "execute", (), {}))
@@ -167,3 +171,49 @@ async def test_table_list_all_rows_pages_until_short_chunk() -> None:
         (0, _ROW_LIST_CHUNK - 1),
         (_ROW_LIST_CHUNK, _ROW_LIST_CHUNK * 2 - 1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_phone_enrichment_attaches_only_inbound_replies() -> None:
+    lead = {"id": "lead-1", "email": "person@example.com"}
+    database = DatabaseStub(
+        {
+            "smartlead_conversations": [
+                SimpleNamespace(data=[{"id": "conversation-1", "lead_id": "lead-1"}])
+            ],
+            "smartlead_replies": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "id": "reply-1",
+                            "conversation_id": "conversation-1",
+                            "body": "Sounds good",
+                            "received_at": "2026-08-01T10:00:00Z",
+                        }
+                    ]
+                )
+            ],
+        }
+    )
+
+    leads = await EnrichmentRepository(database)._attach_replies([lead])
+
+    assert leads[0]["inbound_replies"][0]["body"] == "Sounds good"
+    assert (
+        "smartlead_replies",
+        "eq",
+        ("direction", "inbound"),
+        {},
+    ) in database.calls
+
+
+@pytest.mark.asyncio
+async def test_mark_chat_refreshed_updates_lead_timestamp() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[{}])]} )
+
+    await Repository(database).mark_chat_refreshed("lead-1")
+
+    assert database.calls[0][0] == "leads"
+    assert database.calls[0][1] == "update"
+    assert "chat_refreshed_at" in database.calls[0][2][0]
+    assert database.calls[1][1:] == ("eq", ("id", "lead-1"), {})
