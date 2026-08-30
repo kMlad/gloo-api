@@ -13,6 +13,14 @@ PhoneSource = Literal[
 ]
 ReplyType = Literal["positive", "ooo"]
 AppRole = Literal["admin", "sales_lead", "sdr"]
+LeadStatus = Literal[
+    "new",
+    "attempted",
+    "needs_follow_up",
+    "meeting_booked",
+    "not_interested",
+    "do_not_contact",
+]
 
 
 def _validate_reply_types(reply_types: list[ReplyType]) -> None:
@@ -112,6 +120,8 @@ class LeadListItem(BaseModel):
     linkedin_profile: str | None
     enriched_phone_number: str | None
     phone_source: PhoneSource | None
+    status: LeadStatus
+    notes: str | None
     positive_conversation_count: int
     ooo_conversation_count: int
     latest_reply_at: datetime | None
@@ -127,6 +137,19 @@ class LeadListResponse(BaseModel):
 class LeadDetailResponse(BaseModel):
     lead: dict[str, Any]
     conversations: list[dict[str, Any]]
+
+
+class LeadUpdate(BaseModel):
+    status: LeadStatus | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self) -> "LeadUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one lead field must be provided")
+        if "status" in self.model_fields_set and self.status is None:
+            raise ValueError("status must not be null")
+        return self
 
 
 class InviteUserRequest(BaseModel):

@@ -108,7 +108,7 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
     )
 
     items, total = await Repository(database).list_leads(
-        limit=25, offset=50, reply_type="ooo"
+        limit=25, offset=50, reply_type="ooo", status="needs_follow_up"
     )
 
     assert total == 1
@@ -127,10 +127,43 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
         for index, call in enumerate(lead_calls)
         if call[1] == "eq" and call[2] == ("smartlead_conversations.reply_type", "ooo")
     )
+    status_filter_index = next(
+        index
+        for index, call in enumerate(lead_calls)
+        if call[1] == "eq" and call[2] == ("status", "needs_follow_up")
+    )
     range_index = next(
         index for index, call in enumerate(lead_calls) if call[1] == "range"
     )
     assert filter_index < range_index
+    assert status_filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_update_lead_sets_values_and_timestamp() -> None:
+    updated = {
+        "id": "lead-1",
+        "status": "needs_follow_up",
+        "notes": "Call again Tuesday",
+    }
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[updated])]})
+
+    result = await Repository(database).update_lead(
+        "lead-1",
+        {"status": "needs_follow_up", "notes": "Call again Tuesday"},
+    )
+
+    assert result == updated
+    update_call = database.calls[0]
+    assert update_call[0:2] == ("leads", "update")
+    assert update_call[2][0]["status"] == "needs_follow_up"
+    assert update_call[2][0]["notes"] == "Call again Tuesday"
+    assert "updated_at" in update_call[2][0]
+    assert database.calls[1:] == [
+        ("leads", "eq", ("id", "lead-1"), {}),
+        ("leads", "select", ("*",), {}),
+        ("leads", "execute", (), {}),
+    ]
 
 
 @pytest.mark.asyncio

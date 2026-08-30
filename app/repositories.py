@@ -316,7 +316,12 @@ class Repository:
         return response.data[0]
 
     async def list_leads(
-        self, *, limit: int, offset: int, reply_type: str | None = None
+        self,
+        *,
+        limit: int,
+        offset: int,
+        reply_type: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         selection = "*"
         if reply_type is not None:
@@ -324,6 +329,8 @@ class Repository:
         query = self._db.table("leads").select(selection, count="exact")
         if reply_type is not None:
             query = query.eq("smartlead_conversations.reply_type", reply_type)
+        if status is not None:
+            query = query.eq("status", status)
         response = await (
             query.order("source_observed_at", desc=True)
             .order("id")
@@ -384,6 +391,18 @@ class Repository:
             )
             lead["latest_reply_at"] = max(timestamps) if timestamps else None
         return leads, response.count or len(leads)
+
+    async def update_lead(
+        self, lead_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("leads")
+            .update({**values, "updated_at": to_iso(utc_now())})
+            .eq("id", lead_id)
+            .select("*")
+            .execute()
+        )
+        return response.data[0] if response.data else None
 
     async def clear_unmatched_conversation_reply_types(
         self, campaign_id: int, active_map_ids: set[str]

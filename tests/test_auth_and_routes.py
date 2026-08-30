@@ -20,10 +20,15 @@ from supabase import AuthApiError
 class LeadRepositoryStub:
     def __init__(self) -> None:
         self.reply_types: list[str | None] = []
+        self.statuses: list[str | None] = []
         self.detail_ids: list[str] = []
+        self.updated_leads: list[tuple[str, dict]] = []
 
-    async def list_leads(self, *, limit: int, offset: int, reply_type=None):
+    async def list_leads(
+        self, *, limit: int, offset: int, reply_type=None, status=None
+    ):
         self.reply_types.append(reply_type)
+        self.statuses.append(status)
         return (
             [
                 {
@@ -39,6 +44,8 @@ class LeadRepositoryStub:
                     "linkedin_profile": None,
                     "enriched_phone_number": None,
                     "phone_source": None,
+                    "status": status or "new",
+                    "notes": None,
                     "positive_conversation_count": 1,
                     "ooo_conversation_count": 1 if reply_type == "ooo" else 0,
                     "latest_reply_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
@@ -80,6 +87,17 @@ class LeadRepositoryStub:
 
     async def mark_chat_refreshed(self, lead_id: str) -> None:
         return None
+
+    async def update_lead(self, lead_id: str, values: dict):
+        self.updated_leads.append((lead_id, values))
+        if lead_id == "00000000-0000-0000-0000-000000000000":
+            return None
+        return {
+            "id": lead_id,
+            "email": "person@example.com",
+            "status": values.get("status", "new"),
+            "notes": values.get("notes"),
+        }
 
     async def upsert_reply(self, values):
         return values
@@ -229,19 +247,42 @@ async def test_lead_routes_require_a_valid_user_jwt() -> None:
         assert response.status_code == 200
         assert response.json()["items"][0]["company_name"] == "Acme"
         filtered = await client.get("/api/v1/leads?reply_type=ooo", headers=headers)
+        status_filtered = await client.get(
+            "/api/v1/leads?status=needs_follow_up", headers=headers
+        )
         invalid_filter = await client.get(
             "/api/v1/leads?reply_type=negative", headers=headers
+        )
+        invalid_status = await client.get(
+            "/api/v1/leads?status=contacted", headers=headers
         )
         lead_id = "11111111-1111-1111-1111-111111111111"
         detail = await client.get(f"/api/v1/leads/{lead_id}", headers=headers)
         missing = await client.get(
             "/api/v1/leads/00000000-0000-0000-0000-000000000000", headers=headers
         )
+        updated = await client.patch(
+            f"/api/v1/leads/{lead_id}",
+            headers=headers,
+            json={"status": "needs_follow_up", "notes": "Call again Tuesday"},
+        )
+        missing_update = await client.patch(
+            "/api/v1/leads/00000000-0000-0000-0000-000000000000",
+            headers=headers,
+            json={"status": "attempted"},
+        )
+        empty_update = await client.patch(
+            f"/api/v1/leads/{lead_id}", headers=headers, json={}
+        )
 
     assert filtered.status_code == 200
     assert filtered.json()["items"][0]["ooo_conversation_count"] == 1
     assert invalid_filter.status_code == 422
-    assert repository.reply_types == [None, "ooo"]
+    assert status_filtered.status_code == 200
+    assert status_filtered.json()["items"][0]["status"] == "needs_follow_up"
+    assert invalid_status.status_code == 422
+    assert repository.reply_types == [None, "ooo", None]
+    assert repository.statuses == [None, None, "needs_follow_up"]
     assert detail.status_code == 200
     assert detail.json()["lead"]["id"] == lead_id
     assert [item["direction"] for item in detail.json()["conversations"][0]["replies"]] == [
@@ -249,6 +290,21 @@ async def test_lead_routes_require_a_valid_user_jwt() -> None:
         "inbound",
     ]
     assert missing.status_code == 404
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "needs_follow_up"
+    assert updated.json()["notes"] == "Call again Tuesday"
+    assert missing_update.status_code == 404
+    assert empty_update.status_code == 422
+    assert repository.updated_leads == [
+        (
+            lead_id,
+            {"status": "needs_follow_up", "notes": "Call again Tuesday"},
+        ),
+        (
+            "00000000-0000-0000-0000-000000000000",
+            {"status": "attempted"},
+        ),
+    ]
     assert repository.detail_ids == [
         lead_id,
         "00000000-0000-0000-0000-000000000000",

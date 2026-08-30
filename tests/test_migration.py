@@ -91,6 +91,25 @@ def test_smartlead_lead_conversation_upsert_is_atomic_and_private() -> None:
     assert "to service_role" in migration
 
 
+def test_lead_status_and_notes_migration_is_constrained_and_indexed() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_add_lead_status_and_notes.sql")
+    ).read_text()
+
+    assert "add column status text not null default 'new'" in migration
+    assert "add column notes text" in migration
+    for status in (
+        "new",
+        "attempted",
+        "needs_follow_up",
+        "meeting_booked",
+        "not_interested",
+        "do_not_contact",
+    ):
+        assert f"'{status}'" in migration
+    assert "leads_status_source_observed_at_idx" in migration
+
+
 def test_workbook_tables_migration_is_private_and_typed() -> None:
     migration = next(
         Path("supabase/migrations").glob("*_workbook_tables.sql")

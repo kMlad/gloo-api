@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models import CampaignCreate, CampaignUpdate, InviteUserRequest
+from app.models import CampaignCreate, CampaignUpdate, InviteUserRequest, LeadUpdate
 
 
 def test_campaign_reply_type_defaults_and_valid_combinations() -> None:
@@ -34,6 +34,17 @@ def test_campaign_update_requires_a_field_and_validates_reply_types() -> None:
         CampaignUpdate()
     with pytest.raises(ValidationError):
         CampaignUpdate(reply_types=[])
+
+
+def test_lead_update_requires_a_field_and_rejects_invalid_status() -> None:
+    assert LeadUpdate(status="needs_follow_up").status == "needs_follow_up"
+    assert LeadUpdate(notes=None).notes is None
+    with pytest.raises(ValueError):
+        LeadUpdate()
+    with pytest.raises(ValueError):
+        LeadUpdate(status=None)
+    with pytest.raises(ValueError):
+        LeadUpdate(status="contacted")
 
 
 def test_invite_user_request_requires_email_and_known_role() -> None:
