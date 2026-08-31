@@ -5,6 +5,7 @@ import httpx
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from perplexity import AsyncPerplexity
+from starlette.types import ASGIApp
 
 from app.env import get_env, load_cors_allowed_origins
 from app.phone_enrichment.providers import (
@@ -42,6 +43,30 @@ from app.tables.routes import router as tables_router
 from app.tables.service import TableService
 from app.tables.sheriff.perplexity import PerplexitySheriffAgent
 from supabase import AsyncClient, acreate_client
+
+
+class GlobalCORSMiddlewareFastAPI(FastAPI):
+    def __init__(
+        self,
+        *,
+        cors_allowed_origins: Sequence[str],
+        **kwargs: object,
+    ) -> None:
+        self._cors_allowed_origins = list(cors_allowed_origins)
+        super().__init__(**kwargs)
+
+    def build_middleware_stack(self) -> ASGIApp:
+        application = super().build_middleware_stack()
+        if not self._cors_allowed_origins:
+            return application
+        return CORSMiddleware(
+            application,
+            allow_origins=self._cors_allowed_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["Content-Disposition"],
+        )
 
 
 @asynccontextmanager
@@ -234,21 +259,15 @@ def create_app(
     use_lifespan: bool = True,
     cors_allowed_origins: Sequence[str] | None = None,
 ) -> FastAPI:
-    application = FastAPI(lifespan=lifespan if use_lifespan else None)
     origins = (
         list[str](cors_allowed_origins)
         if cors_allowed_origins is not None
         else load_cors_allowed_origins()
     )
-    if origins:
-        application.add_middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-            expose_headers=["Content-Disposition"],
-        )
+    application = GlobalCORSMiddlewareFastAPI(
+        lifespan=lifespan if use_lifespan else None,
+        cors_allowed_origins=origins,
+    )
     application.include_router(smartlead_router)
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)

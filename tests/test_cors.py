@@ -75,3 +75,27 @@ async def test_cors_preflight_allows_configured_origin() -> None:
     assert "authorization" in preflight.headers["access-control-allow-headers"].lower()
     assert blocked.headers.get("access-control-allow-origin") != "http://localhost:3000"
     assert request.headers["access-control-allow-origin"] == LOCAL_ORIGIN
+
+
+@pytest.mark.asyncio
+async def test_cors_headers_are_added_to_unhandled_error_responses() -> None:
+    app = create_app(
+        use_lifespan=False,
+        cors_allowed_origins=[LOCAL_ORIGIN],
+    )
+
+    @app.get("/unhandled-error")
+    async def unhandled_error() -> None:
+        raise RuntimeError("test error")
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/unhandled-error",
+            headers={"Origin": LOCAL_ORIGIN},
+        )
+
+    assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == LOCAL_ORIGIN
