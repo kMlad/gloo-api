@@ -1,0 +1,29 @@
+# VCS and editor
+.git
+.gitignore
+.cursor
+.DS_Store
+
+# Local environments and secrets — inject at runtime
+.venv
+.env
+.env.*
+
+# Caches and build artifacts
+__pycache__
+*.py[oc]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+build
+dist
+wheels
+
+# Not needed in the runtime image
+tests
+outputs
+supabase
+AGENTS.md
+.dockerignore
+Dockerfile
