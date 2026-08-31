@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from app.models import ImportRequest
-from app.services import ImportLimitExceeded, ImportService, ImportValidationError
+from app.services import ImportLimitExceeded, ImportService
 from app.smartlead.client import SmartLeadError
 from app.utils import merge_non_empty
 
@@ -26,6 +26,7 @@ class FakeRepository:
         self.leads: dict[str, dict] = {}
         self.conversations: dict[tuple[int, str], dict] = {}
         self.replies: dict[str, dict] = {}
+        self.run_items: dict[tuple[str, str], dict] = {}
         self.clear_calls: list[tuple[int, set[str]]] = []
 
     async def list_campaigns(self, *, enabled_only: bool = False):
@@ -44,7 +45,7 @@ class FakeRepository:
         run_id = str(uuid4())
         run = {
             "id": run_id,
-            "status": "running",
+            "status": "queued",
             **values,
             "qualifying_conversation_count": 0,
             "leads_processed": 0,
@@ -60,6 +61,34 @@ class FakeRepository:
     async def update_import_run(self, run_id, values):
         self.runs[run_id].update(values)
         return deepcopy(self.runs[run_id])
+
+    async def claim_import_run(self, run_id):
+        if self.runs[run_id]["status"] != "queued":
+            return None
+        self.runs[run_id]["status"] = "running"
+        return deepcopy(self.runs[run_id])
+
+    async def get_import_run(self, run_id):
+        run = self.runs.get(run_id)
+        return deepcopy(run) if run is not None else None
+
+    async def get_import_run_by_idempotency_key(self, key):
+        return next(
+            (
+                deepcopy(run)
+                for run in self.runs.values()
+                if run.get("idempotency_key") == key
+            ),
+            None,
+        )
+
+    async def upsert_import_run_item(self, **values):
+        key = (values["run_id"], values["conversation_id"])
+        item = {"id": str(uuid4()), **values}
+        if key in self.run_items:
+            item["id"] = self.run_items[key]["id"]
+        self.run_items[key] = item
+        return deepcopy(item)
 
     async def upsert_lead(
         self,
@@ -321,6 +350,18 @@ class CurrentSmartLeadShape(FakeSmartLead):
         return {"messages": [item]}
 
 
+def test_ooo_category_is_not_included_in_positive_filter() -> None:
+    category_ids = ImportService._category_ids_by_reply_type(
+        [
+            {"id": 1, "name": "Interested", "sentiment_type": "positive"},
+            {"id": 6, "name": "Out Of Office", "sentiment_type": "positive"},
+            {"id": 7, "name": "OOO", "sentiment_type": None},
+        ]
+    )
+
+    assert category_ids == {"positive": [1], "ooo": [6, 7]}
+
+
 @pytest.mark.asyncio
 async def test_import_preserves_all_properties_and_only_inbound_replies() -> None:
     repository = FakeRepository()
@@ -437,15 +478,14 @@ async def test_same_email_across_campaigns_creates_one_lead_and_two_snapshots() 
 
 
 @pytest.mark.asyncio
-async def test_disabled_requested_campaign_is_rejected_before_a_run_starts() -> None:
+async def test_manual_import_ignores_legacy_campaign_enabled_flag() -> None:
     repository = FakeRepository(
         campaigns=[{"smartlead_campaign_id": 10, "name": "Disabled", "enabled": False}]
     )
     service = ImportService(repository, FakeSmartLead(), max_conversations=1000)
 
-    with pytest.raises(ImportValidationError, match="disabled"):
-        await service.run(ImportRequest(campaign_ids=[10]))
-    assert repository.runs == {}
+    result = await service.run(ImportRequest(campaign_ids=[10]))
+    assert result["status"] == "succeeded"
 
 
 class CategorizedSmartLead:
@@ -535,7 +575,7 @@ async def test_ooo_only_campaign_imports_and_classifies_ooo_replies() -> None:
     smartlead = CategorizedSmartLead({10: 6})
 
     result = await ImportService(repository, smartlead, max_conversations=1000).run(
-        ImportRequest()
+        ImportRequest(reply_types=["ooo"])
     )
 
     assert result["status"] == "succeeded"
@@ -544,7 +584,7 @@ async def test_ooo_only_campaign_imports_and_classifies_ooo_replies() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mixed_campaign_reply_types_are_fetched_separately() -> None:
+async def test_reply_types_are_selected_per_import_across_campaigns() -> None:
     repository = FakeRepository(
         campaigns=[
             {
@@ -564,7 +604,7 @@ async def test_mixed_campaign_reply_types_are_fetched_separately() -> None:
     smartlead = CategorizedSmartLead({10: 1, 11: 6})
 
     result = await ImportService(repository, smartlead, max_conversations=1000).run(
-        ImportRequest()
+        ImportRequest(reply_types=["positive", "ooo"])
     )
 
     assert result["conversations_processed"] == 2
@@ -572,7 +612,7 @@ async def test_mixed_campaign_reply_types_are_fetched_separately() -> None:
     assert repository.conversations[(11, "map-11")]["reply_type"] == "ooo"
     assert {
         (campaigns, categories) for campaigns, categories, _ in smartlead.inbox_calls
-    } == {((10,), (1,)), ((11,), (6,))}
+    } == {((10, 11), (1, 6))}
 
 
 @pytest.mark.asyncio
@@ -590,13 +630,13 @@ async def test_unbounded_import_updates_or_clears_current_classification() -> No
     smartlead = CategorizedSmartLead({10: 6})
     service = ImportService(repository, smartlead, max_conversations=1000)
 
-    await service.run(ImportRequest())
+    await service.run(ImportRequest(reply_types=["positive", "ooo"]))
     smartlead.categories_by_campaign[10] = 1
-    await service.run(ImportRequest())
+    await service.run(ImportRequest(reply_types=["positive", "ooo"]))
     assert repository.conversations[(10, "map-10")]["reply_type"] == "positive"
 
     smartlead.categories_by_campaign.clear()
-    await service.run(ImportRequest())
+    await service.run(ImportRequest(reply_types=["positive", "ooo"]))
     assert repository.conversations[(10, "map-10")]["reply_type"] is None
 
 
@@ -614,10 +654,15 @@ async def test_date_bounded_import_does_not_clear_missing_classification() -> No
     )
     smartlead = CategorizedSmartLead({10: 6})
     service = ImportService(repository, smartlead, max_conversations=1000)
-    await service.run(ImportRequest())
+    await service.run(ImportRequest(reply_types=["ooo"]))
 
     smartlead.categories_by_campaign.clear()
-    await service.run(ImportRequest(reply_time_from=datetime(2026, 8, 1, tzinfo=UTC)))
+    await service.run(
+        ImportRequest(
+            reply_types=["ooo"],
+            reply_time_from=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+    )
 
     assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
     assert len(repository.clear_calls) == 1
@@ -637,13 +682,13 @@ async def test_partial_import_does_not_clear_existing_classifications() -> None:
     )
     smartlead = CategorizedSmartLead({10: 6})
     service = ImportService(repository, smartlead, max_conversations=1000)
-    await service.run(ImportRequest())
+    await service.run(ImportRequest(reply_types=["ooo"]))
 
     async def failing_details(**kwargs):
         raise SmartLeadError("detail lookup failed")
 
     smartlead.get_campaign_leads_page = failing_details
-    result = await service.run(ImportRequest())
+    result = await service.run(ImportRequest(reply_types=["ooo"]))
 
     assert result["status"] == "partial"
     assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"

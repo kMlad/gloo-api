@@ -24,6 +24,98 @@ class Repository:
         response = await query.order("smartlead_campaign_id").execute()
         return response.data
 
+    async def sync_campaign_catalog(
+        self, campaigns: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        remote_campaigns = [item for item in campaigns if item.get("id") is not None]
+        if not remote_campaigns:
+            return []
+        now = to_iso(utc_now())
+        campaign_ids = [int(item["id"]) for item in remote_campaigns]
+        existing_response = await (
+            self._db.table("smartlead_campaigns")
+            .select("smartlead_campaign_id,enabled,reply_types,created_at")
+            .in_("smartlead_campaign_id", campaign_ids)
+            .execute()
+        )
+        existing_by_id = {
+            int(item["smartlead_campaign_id"]): item for item in existing_response.data
+        }
+        values = [
+            {
+                "smartlead_campaign_id": int(campaign["id"]),
+                "name": str(campaign.get("name") or f"SmartLead campaign {campaign['id']}"),
+                "status": (
+                    str(campaign["status"]) if campaign.get("status") is not None else None
+                ),
+                "tags": campaign.get("tags") if isinstance(campaign.get("tags"), list) else [],
+                "last_synced_at": now,
+                "enabled": existing_by_id.get(int(campaign["id"]), {}).get(
+                    "enabled", True
+                ),
+                "reply_types": existing_by_id.get(int(campaign["id"]), {}).get(
+                    "reply_types", ["positive"]
+                ),
+                "created_at": existing_by_id.get(int(campaign["id"]), {}).get(
+                    "created_at", now
+                ),
+                "updated_at": now,
+            }
+            for campaign in remote_campaigns
+        ]
+        response = await (
+            self._db.table("smartlead_campaigns")
+            .upsert(values, on_conflict="smartlead_campaign_id")
+            .execute()
+        )
+        return response.data
+
+    async def get_campaign_import_stats(
+        self, campaign_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        if not campaign_ids:
+            return {}
+        conversations_response = await (
+            self._db.table("smartlead_conversations")
+            .select("lead_id,smartlead_campaign_id,reply_type")
+            .in_("smartlead_campaign_id", campaign_ids)
+            .execute()
+        )
+        items_response = await (
+            self._db.table("smartlead_import_run_items")
+            .select("run_id,smartlead_campaign_id,created_at")
+            .in_("smartlead_campaign_id", campaign_ids)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        stats: dict[int, dict[str, Any]] = {}
+        lead_sets: dict[int, set[str]] = {}
+        positive_sets: dict[int, set[str]] = {}
+        ooo_sets: dict[int, set[str]] = {}
+        for conversation in conversations_response.data:
+            campaign_id = int(conversation["smartlead_campaign_id"])
+            lead_id = str(conversation["lead_id"])
+            lead_sets.setdefault(campaign_id, set()).add(lead_id)
+            if conversation.get("reply_type") == "positive":
+                positive_sets.setdefault(campaign_id, set()).add(lead_id)
+            elif conversation.get("reply_type") == "ooo":
+                ooo_sets.setdefault(campaign_id, set()).add(lead_id)
+        for campaign_id in campaign_ids:
+            stats[campaign_id] = {
+                "ever_imported": bool(lead_sets.get(campaign_id)),
+                "imported_lead_count": len(lead_sets.get(campaign_id, set())),
+                "positive_lead_count": len(positive_sets.get(campaign_id, set())),
+                "ooo_lead_count": len(ooo_sets.get(campaign_id, set())),
+                "last_imported_at": None,
+                "last_import_run_id": None,
+            }
+        for item in items_response.data:
+            campaign_id = int(item["smartlead_campaign_id"])
+            if stats[campaign_id]["last_imported_at"] is None:
+                stats[campaign_id]["last_imported_at"] = item["created_at"]
+                stats[campaign_id]["last_import_run_id"] = item["run_id"]
+        return stats
+
     async def get_campaigns_by_ids(
         self, campaign_ids: list[int]
     ) -> list[dict[str, Any]]:
@@ -96,7 +188,7 @@ class Repository:
                     "updated_at": to_iso(now),
                 }
             )
-            .eq("status", "running")
+            .in_("status", ["queued", "running"])
             .lt("started_at", to_iso(cutoff))
             .execute()
         )
@@ -105,9 +197,12 @@ class Repository:
         self,
         *,
         campaign_ids: list[int],
+        reply_types: list[str],
         reply_time_from: str | None,
         reply_time_to: str | None,
         max_conversations: int,
+        requested_by: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         await self.expire_stale_imports()
         try:
@@ -115,11 +210,14 @@ class Repository:
                 self._db.table("smartlead_import_runs")
                 .insert(
                     {
-                        "status": "running",
+                        "status": "queued",
                         "campaign_ids": campaign_ids,
+                        "reply_types": reply_types,
                         "reply_time_from": reply_time_from,
                         "reply_time_to": reply_time_to,
                         "max_conversations": max_conversations,
+                        "requested_by": requested_by,
+                        "idempotency_key": idempotency_key,
                     }
                 )
                 .execute()
@@ -129,6 +227,65 @@ class Repository:
                 raise ConcurrentImportError from exc
             raise
         return response.data[0]
+
+    async def get_import_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("smartlead_import_runs")
+            .select("*")
+            .eq("idempotency_key", idempotency_key)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def list_import_runs(
+        self, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        response = await (
+            self._db.table("smartlead_import_runs")
+            .select("*", count="exact")
+            .order("created_at", desc=True)
+            .order("id")
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return response.data, response.count or len(response.data)
+
+    async def upsert_import_run_item(
+        self,
+        *,
+        run_id: str,
+        lead_id: str,
+        conversation_id: str,
+        campaign_id: int,
+        reply_type: str,
+    ) -> dict[str, Any]:
+        response = await (
+            self._db.table("smartlead_import_run_items")
+            .upsert(
+                {
+                    "run_id": run_id,
+                    "lead_id": lead_id,
+                    "conversation_id": conversation_id,
+                    "smartlead_campaign_id": campaign_id,
+                    "reply_type": reply_type,
+                },
+                on_conflict="run_id,conversation_id",
+            )
+            .execute()
+        )
+        return response.data[0]
+
+    async def get_import_run_lead_ids(self, run_id: str) -> list[str]:
+        response = await (
+            self._db.table("smartlead_import_run_items")
+            .select("lead_id")
+            .eq("run_id", run_id)
+            .execute()
+        )
+        return list(dict.fromkeys(str(item["lead_id"]) for item in response.data))
 
     async def update_import_run(
         self, run_id: str, values: dict[str, Any]
@@ -141,6 +298,16 @@ class Repository:
             .execute()
         )
         return response.data[0]
+
+    async def claim_import_run(self, run_id: str) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("smartlead_import_runs")
+            .update({"status": "running", "updated_at": to_iso(utc_now())})
+            .eq("id", run_id)
+            .eq("status", "queued")
+            .execute()
+        )
+        return response.data[0] if response.data else None
 
     async def get_import_run(self, run_id: str) -> dict[str, Any] | None:
         response = await (
@@ -321,16 +488,39 @@ class Repository:
         limit: int,
         offset: int,
         reply_type: str | None = None,
+        reply_types: list[str] | None = None,
         status: str | None = None,
+        campaign_id: int | None = None,
+        import_run_id: str | None = None,
+        assignment_status: str | None = None,
+        assigned_sdr_id: str | None = None,
+        visible_to_sdr_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
+        if reply_type is not None:
+            reply_types = list(dict.fromkeys([*(reply_types or []), reply_type]))
         selection = "*"
-        if reply_type is not None:
-            selection += ",smartlead_conversations!inner(reply_type)"
+        if reply_types is not None or campaign_id is not None:
+            selection += ",smartlead_conversations!inner(reply_type,smartlead_campaign_id)"
         query = self._db.table("leads").select(selection, count="exact")
-        if reply_type is not None:
-            query = query.eq("smartlead_conversations.reply_type", reply_type)
+        if reply_types is not None:
+            query = query.in_("smartlead_conversations.reply_type", reply_types)
+        if campaign_id is not None:
+            query = query.eq("smartlead_conversations.smartlead_campaign_id", campaign_id)
+        if import_run_id is not None:
+            import_lead_ids = await self.get_import_run_lead_ids(import_run_id)
+            if not import_lead_ids:
+                return [], 0
+            query = query.in_("id", import_lead_ids)
         if status is not None:
             query = query.eq("status", status)
+        if visible_to_sdr_id is not None:
+            query = query.eq("assigned_sdr_id", visible_to_sdr_id)
+        elif assigned_sdr_id is not None:
+            query = query.eq("assigned_sdr_id", assigned_sdr_id)
+        if assignment_status == "unassigned":
+            query = query.is_("assigned_sdr_id", "null")
+        elif assignment_status == "assigned":
+            query = query.filter("assigned_sdr_id", "not.is", "null")
         response = await (
             query.order("source_observed_at", desc=True)
             .order("id")
@@ -346,11 +536,29 @@ class Repository:
         lead_ids = [lead["id"] for lead in leads]
         conversations_response = await (
             self._db.table("smartlead_conversations")
-            .select("id,lead_id,reply_type")
+            .select(
+                "id,lead_id,smartlead_campaign_id,reply_type,qualified_at"
+            )
             .in_("lead_id", lead_ids)
             .execute()
         )
         conversations = conversations_response.data
+        source_campaign_ids = sorted(
+            {
+                int(item["smartlead_campaign_id"])
+                for item in conversations
+                if item.get("smartlead_campaign_id") is not None
+            }
+        )
+        source_campaigns = (
+            await self.get_campaigns_by_ids(source_campaign_ids)
+            if source_campaign_ids
+            else []
+        )
+        campaign_names = {
+            int(item["smartlead_campaign_id"]): str(item["name"])
+            for item in source_campaigns
+        }
         conversation_ids = [item["id"] for item in conversations]
         replies: list[dict[str, Any]] = []
         if conversation_ids:
@@ -390,16 +598,86 @@ class Repository:
                 item.get("reply_type") == "ooo" for item in lead_conversations
             )
             lead["latest_reply_at"] = max(timestamps) if timestamps else None
+            lead["source_campaigns"] = [
+                {
+                    "smartlead_campaign_id": int(item["smartlead_campaign_id"]),
+                    "name": campaign_names.get(
+                        int(item["smartlead_campaign_id"]),
+                        f"SmartLead campaign {item['smartlead_campaign_id']}",
+                    ),
+                    "reply_type": item.get("reply_type"),
+                    "qualified_at": item["qualified_at"],
+                }
+                for item in lead_conversations
+                if item.get("smartlead_campaign_id") is not None
+                and item.get("qualified_at") is not None
+            ]
         return leads, response.count or len(leads)
 
     async def update_lead(
-        self, lead_id: str, values: dict[str, Any]
+        self,
+        lead_id: str,
+        values: dict[str, Any],
+        *,
+        assigned_sdr_id: str | None = None,
     ) -> dict[str, Any] | None:
-        response = await (
+        query = (
             self._db.table("leads")
             .update({**values, "updated_at": to_iso(utc_now())})
             .eq("id", lead_id)
-            .select("*")
+        )
+        if assigned_sdr_id is not None:
+            query = query.eq("assigned_sdr_id", assigned_sdr_id)
+        response = await query.select("*").execute()
+        return response.data[0] if response.data else None
+
+    async def assign_leads(
+        self,
+        lead_ids: list[str],
+        *,
+        sdr_id: str,
+        assigned_by: str,
+    ) -> list[str]:
+        if not lead_ids:
+            return []
+        now = to_iso(utc_now())
+        response = await (
+            self._db.table("leads")
+            .update(
+                {
+                    "assigned_sdr_id": sdr_id,
+                    "assigned_by": assigned_by,
+                    "assigned_at": now,
+                    "updated_at": now,
+                }
+            )
+            .in_("id", lead_ids)
+            .is_("assigned_sdr_id", "null")
+            .select("id")
+            .execute()
+        )
+        assigned = {str(item["id"]) for item in response.data}
+        return [lead_id for lead_id in lead_ids if lead_id in assigned]
+
+    async def set_lead_assignment(
+        self,
+        lead_id: str,
+        *,
+        sdr_id: str | None,
+        assigned_by: str,
+    ) -> dict[str, Any] | None:
+        now = to_iso(utc_now())
+        values = {
+            "assigned_sdr_id": sdr_id,
+            "assigned_by": assigned_by if sdr_id is not None else None,
+            "assigned_at": now if sdr_id is not None else None,
+            "updated_at": now,
+        }
+        response = await (
+            self._db.table("leads")
+            .update(values)
+            .eq("id", lead_id)
+            .select("id,assigned_sdr_id,assigned_by,assigned_at")
             .execute()
         )
         return response.data[0] if response.data else None
@@ -429,10 +707,13 @@ class Repository:
             )
         return len(stale_ids)
 
-    async def get_lead_detail(self, lead_id: str) -> dict[str, Any] | None:
-        lead_response = await (
-            self._db.table("leads").select("*").eq("id", lead_id).limit(1).execute()
-        )
+    async def get_lead_detail(
+        self, lead_id: str, *, assigned_sdr_id: str | None = None
+    ) -> dict[str, Any] | None:
+        query = self._db.table("leads").select("*").eq("id", lead_id)
+        if assigned_sdr_id is not None:
+            query = query.eq("assigned_sdr_id", assigned_sdr_id)
+        lead_response = await query.limit(1).execute()
         if not lead_response.data:
             return None
 

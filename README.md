@@ -1,7 +1,8 @@
 # Gloo API
 
-FastAPI service for importing positively categorized SmartLead replies into
-Supabase. Imports are manual and restricted to an API-managed campaign allowlist.
+FastAPI service for discovering SmartLead campaigns, importing positive and
+out-of-office replies into Supabase, and enriching the imported leads with phone
+numbers. Import and phone enrichment are separate, asynchronous runs.
 
 ## Configuration
 
@@ -34,11 +35,15 @@ supabase db reset
 uv run fastapi dev
 ```
 
-Integration endpoints (SmartLead imports and phone enrichment) require:
+SmartLead campaign configuration writes require the internal token:
 
 ```text
 Authorization: Bearer <INTERNAL_API_TOKEN>
 ```
+
+Campaign discovery, imports, import history, and phone enrichment accept that
+internal token or a user JWT whose `app_metadata.role` is `admin` or
+`sales_lead`. SDRs cannot call those routes.
 
 User invite, lead, and table (workbook) endpoints require a Supabase user
 access token:
@@ -47,32 +52,52 @@ access token:
 Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
 ```
 
-## Workflow
+## SmartLead workflow
 
-Add an allowed campaign:
+Discover SmartLead campaigns and see which ones have already supplied imported
+leads:
 
 ```shell
-curl -X POST http://127.0.0.1:8000/api/v1/smartlead/campaigns \
-  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"smartlead_campaign_id": 12345, "enabled": true, "reply_types": ["positive", "ooo"]}'
+curl http://127.0.0.1:8000/api/v1/smartlead/campaigns \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN"
 ```
 
-Import all enabled campaigns:
+The response is synchronized from SmartLead and includes campaign status, tags,
+`ever_imported`, imported lead counts by reply type, and the most recent import
+run. `enabled` remains available for legacy scheduled or all-enabled imports;
+sales leads can explicitly import any campaign returned by discovery.
+
+Queue a positive-reply import for selected campaigns:
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/smartlead/imports \
-  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Idempotency-Key: smartlead-import-2026-08-31-01" \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"campaign_ids": [12345, 67890], "reply_types": ["positive"]}'
 ```
 
-Campaign `reply_types` may be `["positive"]`, `["ooo"]`, or both and can be
-changed with `PATCH /api/v1/smartlead/campaigns/{campaign_id}`. Existing and
-new campaigns default to positive replies only. An import may instead specify
-`campaign_ids`, `reply_time_from`, and
-`reply_time_to`. Timestamps must be timezone-aware ISO 8601 values. Imports over
-the configured conversation limit are rejected before reply histories are read.
+Set `reply_types` to `["ooo"]` for only out-of-office replies or
+`["positive", "ooo"]` for both. The filter belongs to the import request, so
+campaign discovery/configuration and importing remain separate concerns. An
+import may also specify timezone-aware `reply_time_from` and `reply_time_to`
+values. Omitting `campaign_ids` imports all campaigns whose legacy `enabled`
+flag is true.
+
+The endpoint returns **202** with a durable run record in `queued` status; the
+import then runs as an API background task. The idempotency key makes a
+retry return the original run. Only one SmartLead import may be queued or
+running at a time, and imports over `SMARTLEAD_IMPORT_LIMIT` are rejected before
+reply histories are read. SmartLead calls are throttled within the API process
+below its documented API-key limit.
+
+Inspect import history, status, and the exact leads captured by a run:
+
+```text
+GET /api/v1/smartlead/imports?limit=25&offset=0
+GET /api/v1/smartlead/imports/{run_id}
+GET /api/v1/smartlead/imports/{run_id}/leads
+```
 
 Imports atomically persist each lead with its SmartLead conversation. To repair
 legacy leads whose conversation row was not written, rerun the import with the
@@ -80,44 +105,81 @@ affected campaigns and reply-time range. The upserts are idempotent, and a
 successful import invalidates the lead's chat cache so the next detail request
 loads the complete SmartLead history.
 
-For a historical repair, first make sure each campaign's `reply_types` includes
-every historical category that must be retained, then run an unbounded import
-after deploying the atomic-upsert migration and application change:
+For a historical repair, explicitly request every reply category that must be
+retained, then run an unbounded import after deploying the migrations:
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/smartlead/imports \
   -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  -H "Idempotency-Key: smartlead-historical-repair-01" \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"reply_types": ["positive", "ooo"]}'
 ```
 
 Date filters apply to SmartLead reply timestamps, not local lead creation dates,
 so a creation-date cutoff is not sufficient to repair an older reply batch.
 
-List imported leads with `GET /api/v1/leads` (user access token), or use
-`GET /api/v1/leads?reply_type=ooo` to select currently OOO leads for phone
-enrichment. Retrieve complete canonical, campaign-specific, custom-property,
-and full SmartLead chat history (inbound and outbound) with
-`GET /api/v1/leads/{lead_id}`. Cached threads are refreshed from SmartLead
-when older than `SMARTLEAD_CHAT_REFRESH_TTL_SECONDS` (default 1 hour).
+List imported leads with `GET /api/v1/leads` (user access token). Filters include
+`campaign_id`, `import_run_id`, `status`, singular `reply_type`, and repeated
+`reply_types`, for example
+`?reply_types=positive&reply_types=ooo&campaign_id=12345`. Every list item
+includes `source_campaigns` so the UI can show where and why the lead qualified.
+Retrieve complete canonical, campaign-specific, custom-property, and full
+SmartLead chat history (inbound and outbound) with
+`GET /api/v1/leads/{lead_id}`. Cached threads are refreshed from SmartLead when
+older than `SMARTLEAD_CHAT_REFRESH_TTL_SECONDS` (default 1 hour).
+
+## Lead assignment
+
+Admins and sales leads can find assignment candidates by combining the existing
+SmartLead filters with `assignment_status=unassigned`, for example:
+
+```text
+GET /api/v1/leads?campaign_id=12345&reply_type=positive&assignment_status=unassigned
+```
+
+The UI confirms a concrete snapshot by sending up to 100 exact lead IDs. Leads
+that were assigned by another manager after the list was loaded are skipped
+rather than overwritten:
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/leads/assignments \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"lead_ids": ["00000000-0000-0000-0000-000000000000"], "sdr_id": "11111111-1111-1111-1111-111111111111"}'
+```
+
+Use `GET /api/v1/users/sdrs` to populate the assignee picker. Explicit recovery
+operations are `PUT /api/v1/leads/{lead_id}/assignment` with an `sdr_id` to
+replace the owner and `DELETE /api/v1/leads/{lead_id}/assignment` to unassign.
+Only admins and sales leads may use these operations.
+
+SDRs can list, retrieve, and update only leads assigned to their own Auth user
+ID. Other and unassigned leads return no list rows and `404` from detail/update
+routes. SDR updates remain limited to the existing `status` and `notes` fields.
 
 ## Phone enrichment
 
-Enrich selected leads:
+Queue phone enrichment for the exact lead snapshot from a completed SmartLead
+import (internal token or an admin / sales-lead JWT):
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/phone-enrichments \
-  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
   -H "Idempotency-Key: phone-run-2026-08-12-01" \
   -H "Content-Type: application/json" \
-  -d '{"lead_ids": ["00000000-0000-0000-0000-000000000000"]}'
+  -d '{"source_import_run_id": "00000000-0000-0000-0000-000000000000"}'
 ```
 
-Omit `lead_ids` to enrich the newest eligible leads; `limit` defaults to 25
-and is capped at 100. The service checks inbound reply signatures first, then
-LeadMagic, Prospeo, AirScale, and FullEnrich, stopping at the first valid E.164
-number. FullEnrich runs may remain in `waiting` until its authenticated webhook
-arrives. Inspect a run with `GET /api/v1/phone-enrichments/{run_id}` or use
+This is a separate **202** queued run; importing never starts enrichment
+automatically. Alternatively, send `lead_ids` (up to 100), or omit both selectors
+to enrich the newest eligible leads (`limit` defaults to 25 and is capped at
+100). `lead_ids` and `source_import_run_id` are mutually exclusive.
+
+The service checks inbound reply signatures first, then LeadMagic, Prospeo,
+AirScale, and FullEnrich, stopping at the first valid E.164 number. FullEnrich
+runs may remain in `waiting` until its authenticated webhook arrives. Inspect a
+run with `GET /api/v1/phone-enrichments/{run_id}` or use
 `POST /api/v1/phone-enrichments/{run_id}/reconcile` after five minutes if a
 callback needs reconciliation.
 

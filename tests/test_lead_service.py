@@ -15,8 +15,12 @@ class FakeLeadRepository:
         self.conversations = deepcopy(conversations)
         self.replies: list[dict] = []
         self.mark_calls = 0
+        self.detail_scopes: list[str | None] = []
 
-    async def get_lead_detail(self, lead_id: str) -> dict | None:
+    async def get_lead_detail(
+        self, lead_id: str, *, assigned_sdr_id: str | None = None
+    ) -> dict | None:
+        self.detail_scopes.append(assigned_sdr_id)
         if self.lead is None:
             return None
         replies_by_conversation: dict[str, list[dict]] = {}
@@ -105,6 +109,23 @@ async def test_get_detail_returns_none_when_lead_is_missing() -> None:
     )
 
     assert await service.get_detail("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_get_detail_scopes_every_read_to_the_sdr() -> None:
+    repository = FakeLeadRepository(
+        lead={"id": "lead-1", "chat_refreshed_at": None},
+        conversations=[],
+    )
+    service = LeadService(
+        repository,
+        FakeSmartLead(),
+        chat_refresh_ttl_seconds=3600,
+    )
+
+    await service.get_detail("lead-1", assigned_sdr_id="sdr-1")
+
+    assert repository.detail_scopes == ["sdr-1", "sdr-1"]
 
 
 @pytest.mark.asyncio

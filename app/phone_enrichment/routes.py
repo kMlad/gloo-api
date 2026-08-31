@@ -1,9 +1,17 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Response,
+    status,
+)
 
-from app.auth import require_internal_token
+from app.auth import AuthenticatedUser, require_internal_or_admin_or_sales_lead
 from app.dependencies import get_phone_enrichment_service
 from app.phone_enrichment.schemas import (
     PhoneEnrichmentRequest,
@@ -21,7 +29,6 @@ from app.phone_enrichment.service import (
 internal_router = APIRouter(
     prefix="/api/v1/phone-enrichments",
     tags=["phone-enrichments"],
-    dependencies=[Depends(require_internal_token)],
 )
 webhook_router = APIRouter(
     prefix="/api/v1/phone-enrichments/webhooks",
@@ -38,6 +45,10 @@ ServiceDependency = Annotated[
 )
 async def create_phone_enrichment(
     service: ServiceDependency,
+    actor: Annotated[
+        AuthenticatedUser | None, Depends(require_internal_or_admin_or_sales_lead)
+    ],
+    background_tasks: BackgroundTasks,
     idempotency_key: Annotated[
         str,
         Header(alias="Idempotency-Key", min_length=8, max_length=128),
@@ -45,7 +56,14 @@ async def create_phone_enrichment(
     payload: PhoneEnrichmentRequest | None = None,
 ) -> dict[str, Any]:
     try:
-        return await service.run(payload or PhoneEnrichmentRequest(), idempotency_key)
+        run = await service.start(
+            payload or PhoneEnrichmentRequest(),
+            idempotency_key,
+            created_by=actor.id if actor is not None else None,
+        )
+        if run["status"] == "queued":
+            background_tasks.add_task(service.execute_background, str(run["id"]))
+        return run
     except EnrichmentConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except EnrichmentValidationError as exc:
@@ -54,7 +72,11 @@ async def create_phone_enrichment(
         ) from exc
 
 
-@internal_router.get("/{run_id}", response_model=PhoneEnrichmentRunResponse)
+@internal_router.get(
+    "/{run_id}",
+    response_model=PhoneEnrichmentRunResponse,
+    dependencies=[Depends(require_internal_or_admin_or_sales_lead)],
+)
 async def get_phone_enrichment(
     run_id: UUID, service: ServiceDependency
 ) -> dict[str, Any]:
@@ -64,7 +86,11 @@ async def get_phone_enrichment(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@internal_router.post("/{run_id}/reconcile", response_model=PhoneEnrichmentRunResponse)
+@internal_router.post(
+    "/{run_id}/reconcile",
+    response_model=PhoneEnrichmentRunResponse,
+    dependencies=[Depends(require_internal_or_admin_or_sales_lead)],
+)
 async def reconcile_phone_enrichment(
     run_id: UUID, service: ServiceDependency
 ) -> dict[str, Any]:

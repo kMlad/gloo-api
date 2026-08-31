@@ -35,8 +35,17 @@ class QueryStub:
     def in_(self, *args, **kwargs):
         return self._record("in", *args, **kwargs)
 
+    def is_(self, *args, **kwargs):
+        return self._record("is", *args, **kwargs)
+
+    def filter(self, *args, **kwargs):
+        return self._record("filter", *args, **kwargs)
+
     def update(self, *args, **kwargs):
         return self._record("update", *args, **kwargs)
+
+    def upsert(self, *args, **kwargs):
+        return self._record("upsert", *args, **kwargs)
 
     async def execute(self):
         self.calls.append((self.table, "execute", (), {}))
@@ -54,6 +63,39 @@ class DatabaseStub:
     def rpc(self, function, params):
         self.calls.append((function, "rpc", (params,), {}))
         return QueryStub(function, self.responses[function].pop(0), self.calls)
+
+
+@pytest.mark.asyncio
+async def test_campaign_sync_preserves_local_import_configuration() -> None:
+    created_at = "2026-08-01T10:00:00Z"
+    database = DatabaseStub(
+        {
+            "smartlead_campaigns": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "smartlead_campaign_id": 10,
+                            "enabled": False,
+                            "reply_types": ["ooo"],
+                            "created_at": created_at,
+                        }
+                    ]
+                ),
+                SimpleNamespace(data=[{"smartlead_campaign_id": 10}]),
+            ]
+        }
+    )
+
+    await Repository(database).sync_campaign_catalog(
+        [{"id": 10, "name": "Live name", "status": "ACTIVE", "tags": []}]
+    )
+
+    upsert_call = next(call for call in database.calls if call[1] == "upsert")
+    payload = upsert_call[2][0][0]
+    assert payload["enabled"] is False
+    assert payload["reply_types"] == ["ooo"]
+    assert payload["created_at"] == created_at
+    assert payload["name"] == "Live name"
 
 
 @pytest.mark.asyncio
@@ -108,7 +150,12 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
     )
 
     items, total = await Repository(database).list_leads(
-        limit=25, offset=50, reply_type="ooo", status="needs_follow_up"
+        limit=25,
+        offset=50,
+        reply_type="ooo",
+        status="needs_follow_up",
+        campaign_id=10,
+        assignment_status="unassigned",
     )
 
     assert total == 1
@@ -119,24 +166,81 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
     lead_calls = [call for call in database.calls if call[0] == "leads"]
     assert lead_calls[0][1:] == (
         "select",
-        ("*,smartlead_conversations!inner(reply_type)",),
+        (
+            "*,smartlead_conversations!inner(reply_type,smartlead_campaign_id)",
+        ),
         {"count": "exact"},
     )
     filter_index = next(
         index
         for index, call in enumerate(lead_calls)
-        if call[1] == "eq" and call[2] == ("smartlead_conversations.reply_type", "ooo")
+        if call[1] == "in"
+        and call[2] == ("smartlead_conversations.reply_type", ["ooo"])
     )
     status_filter_index = next(
         index
         for index, call in enumerate(lead_calls)
         if call[1] == "eq" and call[2] == ("status", "needs_follow_up")
     )
+    campaign_filter_index = next(
+        index
+        for index, call in enumerate(lead_calls)
+        if call[1] == "eq"
+        and call[2] == ("smartlead_conversations.smartlead_campaign_id", 10)
+    )
+    assignment_filter_index = next(
+        index
+        for index, call in enumerate(lead_calls)
+        if call[1] == "is" and call[2] == ("assigned_sdr_id", "null")
+    )
     range_index = next(
         index for index, call in enumerate(lead_calls) if call[1] == "range"
     )
     assert filter_index < range_index
     assert status_filter_index < range_index
+    assert campaign_filter_index < range_index
+    assert assignment_filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_sdr_lead_list_is_scoped_before_pagination() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[], count=0)]})
+
+    items, total = await Repository(database).list_leads(
+        limit=50,
+        offset=0,
+        visible_to_sdr_id="sdr-1",
+    )
+
+    assert items == []
+    assert total == 0
+    owner_filter_index = next(
+        index
+        for index, call in enumerate(database.calls)
+        if call[1] == "eq" and call[2] == ("assigned_sdr_id", "sdr-1")
+    )
+    range_index = next(
+        index for index, call in enumerate(database.calls) if call[1] == "range"
+    )
+    assert owner_filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_sdr_lead_detail_scope_is_applied_to_the_initial_lookup() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[])]})
+
+    detail = await Repository(database).get_lead_detail(
+        "lead-1", assigned_sdr_id="sdr-1"
+    )
+
+    assert detail is None
+    assert database.calls == [
+        ("leads", "select", ("*",), {}),
+        ("leads", "eq", ("id", "lead-1"), {}),
+        ("leads", "eq", ("assigned_sdr_id", "sdr-1"), {}),
+        ("leads", "limit", (1,), {}),
+        ("leads", "execute", (), {}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -164,6 +268,50 @@ async def test_update_lead_sets_values_and_timestamp() -> None:
         ("leads", "select", ("*",), {}),
         ("leads", "execute", (), {}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_assign_leads_only_updates_still_unassigned_rows() -> None:
+    database = DatabaseStub(
+        {"leads": [SimpleNamespace(data=[{"id": "lead-1"}])]}
+    )
+
+    assigned = await Repository(database).assign_leads(
+        ["lead-1", "lead-2"],
+        sdr_id="sdr-1",
+        assigned_by="manager-1",
+    )
+
+    assert assigned == ["lead-1"]
+    values = database.calls[0][2][0]
+    assert values["assigned_sdr_id"] == "sdr-1"
+    assert values["assigned_by"] == "manager-1"
+    assert values["assigned_at"]
+    assert database.calls[1:] == [
+        ("leads", "in", ("id", ["lead-1", "lead-2"]), {}),
+        ("leads", "is", ("assigned_sdr_id", "null"), {}),
+        ("leads", "select", ("id",), {}),
+        ("leads", "execute", (), {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_lead_can_be_scoped_to_assigned_sdr() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[])]})
+
+    result = await Repository(database).update_lead(
+        "lead-1",
+        {"status": "attempted"},
+        assigned_sdr_id="sdr-1",
+    )
+
+    assert result is None
+    assert (
+        "leads",
+        "eq",
+        ("assigned_sdr_id", "sdr-1"),
+        {},
+    ) in database.calls
 
 
 @pytest.mark.asyncio

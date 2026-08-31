@@ -22,11 +22,13 @@ class SmartLeadClient:
         *,
         max_retries: int = 3,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        request_limiter: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._http = http_client
         self._api_key = api_key
         self._max_retries = max_retries
         self._sleep = sleeper
+        self._request_limiter = request_limiter
 
     async def _request(
         self,
@@ -39,6 +41,8 @@ class SmartLeadClient:
         safe_params = {**(params or {}), "api_key": self._api_key}
 
         for attempt in range(self._max_retries + 1):
+            if self._request_limiter is not None:
+                await self._request_limiter()
             try:
                 response = await self._http.request(
                     method,
@@ -96,6 +100,16 @@ class SmartLeadClient:
         if isinstance(payload, dict):
             return payload
         raise SmartLeadError("SmartLead returned an invalid campaign")
+
+    async def list_campaigns(self) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET", "/campaigns/", params={"include_tags": "true"}
+        )
+        if isinstance(payload, dict):
+            payload = payload.get("campaigns", payload.get("data", []))
+        if not isinstance(payload, list):
+            raise SmartLeadError("SmartLead returned an invalid campaign list")
+        return [item for item in payload if isinstance(item, dict)]
 
     async def get_categories(self) -> list[dict[str, Any]]:
         payload = await self._request("GET", "/leads/fetch-categories")

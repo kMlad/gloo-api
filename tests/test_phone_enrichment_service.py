@@ -57,12 +57,15 @@ class FakeEnrichmentRepository:
     async def list_eligible_leads(self, limit):
         return [deepcopy(self.lead)] if limit else []
 
+    async def get_import_run_leads(self, run_id):
+        return [deepcopy(self.lead)]
+
     async def create_run(self, **values):
         run_id = str(uuid4())
         run = {
             "id": run_id,
             **values,
-            "status": "running",
+            "status": values.get("status", "queued"),
             "leads_enriched": 0,
             "leads_not_found": 0,
             "leads_skipped": 0,
@@ -87,7 +90,14 @@ class FakeEnrichmentRepository:
         self.runs[run_id]["updated_at"] = _now()
         return deepcopy(self.runs[run_id])
 
-    async def create_item(self, run_id, lead_id, *, status="running"):
+    async def claim_run(self, run_id):
+        if self.runs[run_id]["status"] != "queued":
+            return None
+        self.runs[run_id]["status"] = "running"
+        self.runs[run_id]["updated_at"] = _now()
+        return deepcopy(self.runs[run_id])
+
+    async def create_item(self, run_id, lead_id, *, status="queued"):
         item_id = str(uuid4())
         item = {
             "id": item_id,
@@ -332,6 +342,36 @@ async def test_existing_enriched_phone_is_never_overwritten() -> None:
     assert result["items"][0]["status"] == "skipped_existing"
     assert repository.lead["enriched_phone_number"] == "+442079460958"
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_import_run_selection_enriches_only_its_snapshot() -> None:
+    lead_id = str(uuid4())
+    import_run_id = uuid4()
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "enriched_phone_number": None,
+            "phone_source": None,
+            "inbound_replies": [
+                {"id": "reply-1", "received_at": _now(), "body": "+14155552671"}
+            ],
+        }
+    )
+    calls: list[str] = []
+    no_result = ProviderResult(status="not_found", request_payload={})
+    service = _service(repository, calls, no_result, no_result, no_result)
+
+    result = await service.run(
+        PhoneEnrichmentRequest(source_import_run_id=import_run_id),
+        "import-run-enrichment-key",
+    )
+
+    assert result["selection_mode"] == "import_run"
+    assert result["source_import_run_id"] == str(import_run_id)
+    assert result["status"] == "succeeded"
+    assert result["items"][0]["lead_id"] == lead_id
 
 
 @pytest.mark.asyncio

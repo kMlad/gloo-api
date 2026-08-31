@@ -7,6 +7,37 @@ from app.smartlead.client import SmartLeadClient
 
 
 @pytest.mark.asyncio
+async def test_lists_campaign_catalog_with_tags() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 10,
+                    "name": "Campaign",
+                    "status": "ACTIVE",
+                    "tags": [{"tag_id": 1, "tag_name": "Outbound"}],
+                }
+            ],
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        campaigns = await SmartLeadClient(
+            http_client, "secret", max_retries=0
+        ).list_campaigns()
+
+    assert captured["url"].path == "/api/v1/campaigns/"
+    assert captured["url"].params["include_tags"] == "true"
+    assert campaigns[0]["status"] == "ACTIVE"
+
+
+@pytest.mark.asyncio
 async def test_retries_rate_limits_and_keeps_api_key_in_query() -> None:
     requests: list[httpx.Request] = []
     delays: list[float] = []

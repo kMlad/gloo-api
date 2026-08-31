@@ -30,7 +30,7 @@ class EnrichmentRepository:
         stale_response = await (
             self._db.table("phone_enrichment_runs")
             .select("id")
-            .eq("status", "running")
+            .in_("status", ["queued", "running"])
             .lt("started_at", cutoff)
             .execute()
         )
@@ -49,7 +49,7 @@ class EnrichmentRepository:
                     }
                 )
                 .eq("run_id", run_id)
-                .eq("status", "running")
+                .in_("status", ["queued", "running"])
                 .execute()
             )
             await self.update_run(
@@ -75,6 +75,9 @@ class EnrichmentRepository:
         requested_lead_ids: list[str],
         requested_limit: int,
         leads_selected: int,
+        source_import_run_id: str | None = None,
+        created_by: str | None = None,
+        status: str = "queued",
     ) -> dict[str, Any]:
         await self.expire_stale_runs()
         response = await (
@@ -86,8 +89,10 @@ class EnrichmentRepository:
                     "selection_mode": selection_mode,
                     "requested_lead_ids": requested_lead_ids,
                     "requested_limit": requested_limit,
-                    "status": "running",
+                    "status": status,
                     "leads_selected": leads_selected,
+                    "source_import_run_id": source_import_run_id,
+                    "created_by": created_by,
                 }
             )
             .execute()
@@ -113,6 +118,16 @@ class EnrichmentRepository:
         )
         return response.data[0]
 
+    async def claim_run(self, run_id: str) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("phone_enrichment_runs")
+            .update({"status": "running", "updated_at": to_iso(utc_now())})
+            .eq("id", run_id)
+            .eq("status", "queued")
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
     async def get_selected_leads(self, lead_ids: list[str]) -> list[dict[str, Any]]:
         if not lead_ids:
             return []
@@ -134,6 +149,29 @@ class EnrichmentRepository:
             .execute()
         )
         return await self._attach_replies(response.data)
+
+    async def get_import_run_leads(self, run_id: str) -> list[dict[str, Any]]:
+        run_response = await (
+            self._db.table("smartlead_import_runs")
+            .select("status")
+            .eq("id", run_id)
+            .limit(1)
+            .execute()
+        )
+        if not run_response.data:
+            raise ValueError("Import run was not found")
+        if run_response.data[0]["status"] not in {"succeeded", "partial"}:
+            raise ValueError("Import run must be completed before enrichment")
+        items_response = await (
+            self._db.table("smartlead_import_run_items")
+            .select("lead_id")
+            .eq("run_id", run_id)
+            .execute()
+        )
+        lead_ids = list(
+            dict.fromkeys(str(item["lead_id"]) for item in items_response.data)
+        )
+        return await self.get_selected_leads(lead_ids)
 
     async def _attach_replies(
         self, leads: list[dict[str, Any]]
@@ -173,21 +211,21 @@ class EnrichmentRepository:
         return leads
 
     async def create_item(
-        self, run_id: str, lead_id: str, *, status: str = "running"
+        self, run_id: str, lead_id: str, *, status: str = "queued"
     ) -> dict[str, Any]:
         values: dict[str, Any] = {
             "run_id": run_id,
             "lead_id": lead_id,
             "status": status,
         }
-        if status not in {"running", "waiting"}:
+        if status not in {"queued", "running", "waiting"}:
             values["completed_at"] = to_iso(utc_now())
         try:
             response = await (
                 self._db.table("phone_enrichment_items").insert(values).execute()
             )
         except APIError as exc:
-            if exc.code == "23505" and status == "running":
+            if exc.code == "23505" and status in {"queued", "running"}:
                 raise ActiveLeadEnrichmentError from exc
             raise
         return response.data[0]

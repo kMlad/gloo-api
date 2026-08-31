@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.models import ImportRequest, ReplyType
-from app.repositories import Repository
+from app.repositories import ConcurrentImportError, Repository
 from app.smartlead.client import SmartLeadClient, SmartLeadError
 from app.utils import (
     chunks,
@@ -68,13 +68,19 @@ class LeadService:
         self._smartlead = smartlead
         self._ttl = timedelta(seconds=chat_refresh_ttl_seconds)
 
-    async def get_detail(self, lead_id: str) -> dict[str, Any] | None:
-        detail = await self._repository.get_lead_detail(lead_id)
+    async def get_detail(
+        self, lead_id: str, *, assigned_sdr_id: str | None = None
+    ) -> dict[str, Any] | None:
+        detail = await self._repository.get_lead_detail(
+            lead_id, assigned_sdr_id=assigned_sdr_id
+        )
         if detail is None:
             return None
         if self._is_stale(detail["lead"].get("chat_refreshed_at")):
             await self._refresh_chat(lead_id, detail["conversations"])
-            detail = await self._repository.get_lead_detail(lead_id)
+            detail = await self._repository.get_lead_detail(
+                lead_id, assigned_sdr_id=assigned_sdr_id
+            )
         return detail
 
     def _is_stale(self, chat_refreshed_at: Any) -> bool:
@@ -163,7 +169,19 @@ class CampaignService:
         self._smartlead = smartlead
 
     async def list(self) -> list[dict[str, Any]]:
-        return await self._repository.list_campaigns()
+        if self._smartlead is not None:
+            remote_campaigns = await self._smartlead.list_campaigns()
+            await self._repository.sync_campaign_catalog(remote_campaigns)
+        campaigns = await self._repository.list_campaigns()
+        campaign_ids = [int(item["smartlead_campaign_id"]) for item in campaigns]
+        stats = await self._repository.get_campaign_import_stats(campaign_ids)
+        return [
+            {
+                **campaign,
+                **stats.get(int(campaign["smartlead_campaign_id"]), {}),
+            }
+            for campaign in campaigns
+        ]
 
     async def add(
         self, campaign_id: int, enabled: bool, reply_types: list[ReplyType]
@@ -200,7 +218,13 @@ class ImportService:
         self._smartlead = smartlead
         self._max_conversations = max_conversations
 
-    async def run(self, request: ImportRequest) -> dict[str, Any]:
+    async def start(
+        self,
+        request: ImportRequest,
+        *,
+        idempotency_key: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
         campaigns = await self._resolve_campaigns(request.campaign_ids)
         campaign_ids = [item["smartlead_campaign_id"] for item in campaigns]
         reply_time_from = (
@@ -208,21 +232,110 @@ class ImportService:
         )
         reply_time_to = to_iso(request.reply_time_to) if request.reply_time_to else None
 
-        run = await self._repository.create_import_run(
-            campaign_ids=campaign_ids,
-            reply_time_from=reply_time_from,
-            reply_time_to=reply_time_to,
-            max_conversations=self._max_conversations,
+        if idempotency_key is not None:
+            existing = await self._repository.get_import_run_by_idempotency_key(
+                idempotency_key
+            )
+            if existing is not None:
+                if not self._matches_request(existing, request, campaign_ids):
+                    raise ImportValidationError(
+                        "Idempotency-Key was already used for a different import"
+                    )
+                return existing
+
+        try:
+            return await self._repository.create_import_run(
+                campaign_ids=campaign_ids,
+                reply_types=list(request.reply_types),
+                reply_time_from=reply_time_from,
+                reply_time_to=reply_time_to,
+                max_conversations=self._max_conversations,
+                requested_by=requested_by,
+                idempotency_key=idempotency_key,
+            )
+        except ConcurrentImportError:
+            # A duplicate idempotent request can race between the read above and
+            # the insert. Resolve that race to the original run; preserve the
+            # conflict for a genuinely different or concurrently active import.
+            if idempotency_key is None:
+                raise
+            existing = await self._repository.get_import_run_by_idempotency_key(
+                idempotency_key
+            )
+            if existing is None or not self._matches_request(
+                existing, request, campaign_ids
+            ):
+                raise
+            return existing
+
+    async def execute(self, run_id: str) -> dict[str, Any]:
+        run = await self._repository.get_import_run(run_id)
+        if run is None:
+            raise ImportValidationError("Import run not found")
+        if run["status"] != "queued":
+            return run
+        claimed = await self._repository.claim_import_run(run_id)
+        if claimed is None:
+            current = await self._repository.get_import_run(run_id)
+            if current is None:
+                raise ImportValidationError("Import run not found")
+            return current
+        run = claimed
+        request = ImportRequest(
+            campaign_ids=[int(value) for value in run["campaign_ids"]],
+            reply_types=list(run.get("reply_types") or ["positive"]),
+            reply_time_from=(
+                parse_datetime(run["reply_time_from"])
+                if run.get("reply_time_from")
+                else None
+            ),
+            reply_time_to=(
+                parse_datetime(run["reply_time_to"])
+                if run.get("reply_time_to")
+                else None
+            ),
         )
+        campaigns = await self._resolve_campaigns(request.campaign_ids)
+        return await self._execute(run_id, request, campaigns)
+
+    async def execute_background(self, run_id: str) -> None:
+        try:
+            await self.execute(run_id)
+        except (ImportValidationError, ImportLimitExceeded):
+            return
+        except Exception as exc:
+            logger.exception("SmartLead import run %s failed", run_id)
+            run = await self._repository.get_import_run(run_id)
+            if run is not None and run["status"] in {"queued", "running"}:
+                await self._finish_run(
+                    run_id,
+                    status="failed",
+                    errors=[{"scope": "import", "message": str(exc)}],
+                )
+
+    async def run(self, request: ImportRequest) -> dict[str, Any]:
+        run = await self.start(request)
+        if run["status"] not in {"queued", "running"}:
+            return run
+        campaigns = await self._resolve_campaigns(request.campaign_ids)
         run_id = str(run["id"])
+        await self._repository.update_import_run(run_id, {"status": "running"})
+        return await self._execute(run_id, request, campaigns)
+
+    async def _execute(
+        self,
+        run_id: str,
+        request: ImportRequest,
+        campaigns: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        campaign_ids = [item["smartlead_campaign_id"] for item in campaigns]
 
         try:
             categories = await self._smartlead.get_categories()
             category_ids_by_type = self._category_ids_by_reply_type(categories)
             required_reply_types = {
                 reply_type
-                for campaign in campaigns
-                for reply_type in campaign.get("reply_types", ["positive"])
+                for reply_type in request.reply_types
             }
             missing_reply_types = sorted(
                 reply_type
@@ -254,8 +367,30 @@ class ImportService:
                 for reply_type, category_ids in category_ids_by_type.items()
                 for category_id in category_ids
             }
+            await self._repository.update_import_run(
+                run_id,
+                {
+                    "resolved_categories": {
+                        reply_type: [
+                            {
+                                "id": category_id,
+                                "name": next(
+                                    (
+                                        str(category.get("name") or "")
+                                        for category in categories
+                                        if int(category.get("id", -1)) == category_id
+                                    ),
+                                    "",
+                                ),
+                            }
+                            for category_id in category_ids_by_type[reply_type]
+                        ]
+                        for reply_type in request.reply_types
+                    }
+                },
+            )
             campaign_groups = self._group_campaigns_by_category_ids(
-                campaigns, category_ids_by_type
+                campaigns, category_ids_by_type, request.reply_types
             )
             count = 0
             preflight_errors: list[dict[str, Any]] = []
@@ -339,6 +474,13 @@ class ImportService:
                 if result is None:
                     continue
                 lead_ids.add(result["lead_id"])
+                await self._repository.upsert_import_run_item(
+                    run_id=run_id,
+                    lead_id=result["lead_id"],
+                    conversation_id=result["conversation_id"],
+                    campaign_id=result["campaign_id"],
+                    reply_type=result["reply_type"],
+                )
                 active_map_ids_by_campaign[result["campaign_id"]].add(
                     result["campaign_lead_map_id"]
                 )
@@ -397,23 +539,37 @@ class ImportService:
             campaigns = await self._repository.get_campaigns_by_ids(requested_ids)
             found = {item["smartlead_campaign_id"] for item in campaigns}
             missing = sorted(set(requested_ids) - found)
-            disabled = sorted(
-                item["smartlead_campaign_id"]
-                for item in campaigns
-                if not item["enabled"]
-            )
             if missing:
-                raise ImportValidationError(
-                    f"Campaigns are not configured: {', '.join(map(str, missing))}"
-                )
-            if disabled:
-                raise ImportValidationError(
-                    f"Campaigns are disabled: {', '.join(map(str, disabled))}"
-                )
+                remote_campaigns = []
+                for campaign_id in missing:
+                    campaign = await self._smartlead.get_campaign(campaign_id)
+                    remote_campaigns.append({**campaign, "id": campaign_id})
+                await self._repository.sync_campaign_catalog(remote_campaigns)
+                campaigns = await self._repository.get_campaigns_by_ids(requested_ids)
 
         if not campaigns:
             raise ImportValidationError("No enabled SmartLead campaigns are configured")
         return campaigns
+
+    @staticmethod
+    def _matches_request(
+        run: dict[str, Any], request: ImportRequest, campaign_ids: list[int]
+    ) -> bool:
+        stored_from = (
+            parse_datetime(run["reply_time_from"])
+            if run.get("reply_time_from")
+            else None
+        )
+        stored_to = (
+            parse_datetime(run["reply_time_to"]) if run.get("reply_time_to") else None
+        )
+        return (
+            [int(value) for value in run.get("campaign_ids", [])] == campaign_ids
+            and list(run.get("reply_types") or ["positive"])
+            == list(request.reply_types)
+            and stored_from == request.reply_time_from
+            and stored_to == request.reply_time_to
+        )
 
     @staticmethod
     def _category_ids_by_reply_type(
@@ -424,15 +580,15 @@ class ImportService:
             category_id = category.get("id")
             if category_id is None:
                 continue
-            if str(category.get("sentiment_type") or "").casefold() == "positive":
-                result["positive"].add(int(category_id))
             normalized_name = "".join(
                 character
                 for character in str(category.get("name") or "").casefold()
                 if character.isalnum()
             )
-            if normalized_name == "outofoffice":
+            if normalized_name in {"outofoffice", "ooo"}:
                 result["ooo"].add(int(category_id))
+            elif str(category.get("sentiment_type") or "").casefold() == "positive":
+                result["positive"].add(int(category_id))
         return {
             reply_type: sorted(category_ids)
             for reply_type, category_ids in result.items()
@@ -442,25 +598,19 @@ class ImportService:
     def _group_campaigns_by_category_ids(
         campaigns: list[dict[str, Any]],
         category_ids_by_type: dict[ReplyType, list[int]],
+        reply_types: list[ReplyType],
     ) -> list[tuple[list[int], list[int]]]:
-        grouped: dict[tuple[int, ...], list[int]] = {}
-        for campaign in campaigns:
-            category_ids = tuple(
-                sorted(
-                    {
-                        category_id
-                        for reply_type in campaign.get("reply_types", ["positive"])
-                        for category_id in category_ids_by_type[reply_type]
-                    }
-                )
-            )
-            grouped.setdefault(category_ids, []).append(
-                int(campaign["smartlead_campaign_id"])
-            )
-        return [
-            (sorted(grouped_campaign_ids), list(category_ids))
-            for category_ids, grouped_campaign_ids in grouped.items()
-        ]
+        category_ids = sorted(
+            {
+                category_id
+                for reply_type in reply_types
+                for category_id in category_ids_by_type[reply_type]
+            }
+        )
+        campaign_ids = sorted(
+            int(campaign["smartlead_campaign_id"]) for campaign in campaigns
+        )
+        return [(campaign_ids, category_ids)]
 
     async def _preflight(
         self,
@@ -778,8 +928,10 @@ class ImportService:
 
         return {
             "lead_id": str(lead["id"]),
+            "conversation_id": str(conversation["id"]),
             "campaign_id": campaign_id,
             "campaign_lead_map_id": map_id,
+            "reply_type": reply_type,
             "reply_count": len(inbound_messages),
         }
 

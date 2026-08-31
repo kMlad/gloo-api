@@ -11,8 +11,9 @@ PhoneProvider = Literal[
     "airscale",
     "fullenrich",
 ]
-RunStatus = Literal["running", "waiting", "succeeded", "partial", "failed"]
+RunStatus = Literal["queued", "running", "waiting", "succeeded", "partial", "failed"]
 ItemStatus = Literal[
+    "queued",
     "running",
     "waiting",
     "enriched",
@@ -36,10 +37,15 @@ AttemptStatus = Literal[
 
 class PhoneEnrichmentRequest(BaseModel):
     lead_ids: list[UUID] | None = None
+    source_import_run_id: UUID | None = None
     limit: int = Field(default=25, ge=1, le=100)
 
     @model_validator(mode="after")
     def validate_lead_ids(self) -> "PhoneEnrichmentRequest":
+        if self.lead_ids is not None and self.source_import_run_id is not None:
+            raise ValueError(
+                "lead_ids and source_import_run_id are mutually exclusive"
+            )
         if self.lead_ids is not None:
             if not self.lead_ids:
                 raise ValueError("lead_ids must not be empty")
@@ -92,8 +98,10 @@ class PhoneEnrichmentRunResponse(BaseModel):
     id: UUID
     idempotency_key: str
     request_fingerprint: str
-    selection_mode: Literal["selected", "eligible"]
+    selection_mode: Literal["selected", "eligible", "import_run"]
     requested_lead_ids: list[UUID]
+    source_import_run_id: UUID | None = None
+    created_by: UUID | None = None
     requested_limit: int
     status: RunStatus
     leads_selected: int

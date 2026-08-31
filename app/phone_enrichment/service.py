@@ -70,8 +70,12 @@ class PhoneEnrichmentService:
             + fullenrich_webhook_token
         )
 
-    async def run(
-        self, request: PhoneEnrichmentRequest, idempotency_key: str
+    async def start(
+        self,
+        request: PhoneEnrichmentRequest,
+        idempotency_key: str,
+        *,
+        created_by: str | None = None,
     ) -> dict[str, Any]:
         fingerprint = self._fingerprint(request)
         existing = await self._repository.get_run_by_idempotency_key(idempotency_key)
@@ -86,7 +90,20 @@ class PhoneEnrichmentService:
             return detail
 
         requested_ids = [str(value) for value in request.lead_ids or []]
-        if requested_ids:
+        source_import_run_id = (
+            str(request.source_import_run_id)
+            if request.source_import_run_id is not None
+            else None
+        )
+        if source_import_run_id is not None:
+            try:
+                leads = await self._repository.get_import_run_leads(
+                    source_import_run_id
+                )
+            except ValueError as exc:
+                raise EnrichmentValidationError(str(exc)) from exc
+            selection_mode = "import_run"
+        elif requested_ids:
             leads = await self._repository.get_selected_leads(requested_ids)
             found = {str(lead["id"]) for lead in leads}
             missing = [lead_id for lead_id in requested_ids if lead_id not in found]
@@ -105,8 +122,14 @@ class PhoneEnrichmentService:
                 request_fingerprint=fingerprint,
                 selection_mode=selection_mode,
                 requested_lead_ids=requested_ids,
-                requested_limit=request.limit,
+                requested_limit=(
+                    max(len(leads), 1)
+                    if selection_mode == "import_run"
+                    else request.limit
+                ),
                 leads_selected=len(leads),
+                source_import_run_id=source_import_run_id,
+                created_by=created_by,
             )
         except APIError as exc:
             if exc.code != "23505":
@@ -124,7 +147,7 @@ class PhoneEnrichmentService:
             return detail
 
         run_id = str(run["id"])
-        active: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        queued = 0
         for lead in leads:
             lead_id = str(lead["id"])
             if str(lead.get("enriched_phone_number") or "").strip():
@@ -133,13 +156,85 @@ class PhoneEnrichmentService:
                 )
                 continue
             try:
-                item = await self._repository.create_item(run_id, lead_id)
+                await self._repository.create_item(run_id, lead_id)
             except ActiveLeadEnrichmentError:
                 await self._repository.create_item(
                     run_id, lead_id, status="skipped_active"
                 )
                 continue
-            active.append((item, lead))
+            queued += 1
+
+        if queued == 0:
+            await self._finalize_run(run_id)
+
+        detail = await self._repository.get_run_detail(run_id)
+        if detail is None:
+            raise EnrichmentNotFoundError("Enrichment run not found")
+        return detail
+
+    async def execute_background(self, run_id: str) -> None:
+        try:
+            await self.execute(run_id)
+        except Exception as exc:  # noqa: BLE001 - background worker boundary
+            now = to_iso(utc_now())
+            for item in await self._repository.list_items(run_id):
+                if item["status"] not in {"queued", "running"}:
+                    continue
+                await self._repository.update_item(
+                    str(item["id"]),
+                    {
+                        "status": "failed",
+                        "had_provider_error": True,
+                        "error_message": str(exc),
+                        "completed_at": now,
+                    },
+                )
+            await self._repository.update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "errors": [{"scope": "run", "message": str(exc)}],
+                    "completed_at": now,
+                },
+            )
+
+    async def execute(self, run_id: str) -> dict[str, Any]:
+        detail = await self._repository.get_run_detail(run_id)
+        if detail is None:
+            raise EnrichmentNotFoundError("Enrichment run not found")
+        if detail["status"] != "queued":
+            return detail
+        if await self._repository.claim_run(run_id) is None:
+            current = await self._repository.get_run_detail(run_id)
+            if current is None:
+                raise EnrichmentNotFoundError("Enrichment run not found")
+            return current
+
+        queued_items = [
+            item for item in detail.get("items", []) if item["status"] == "queued"
+        ]
+        leads = await self._repository.get_selected_leads(
+            [str(item["lead_id"]) for item in queued_items]
+        )
+        leads_by_id = {str(lead["id"]): lead for lead in leads}
+        active: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for item in queued_items:
+            lead = leads_by_id.get(str(item["lead_id"]))
+            if lead is None:
+                await self._repository.update_item(
+                    str(item["id"]),
+                    {
+                        "status": "failed",
+                        "had_provider_error": True,
+                        "error_message": "Lead disappeared before enrichment started",
+                        "completed_at": to_iso(utc_now()),
+                    },
+                )
+                continue
+            updated_item = await self._repository.update_item(
+                str(item["id"]), {"status": "running"}
+            )
+            active.append((updated_item, lead))
 
         semaphore = asyncio.Semaphore(self._concurrency)
 
@@ -162,6 +257,14 @@ class PhoneEnrichmentService:
         if detail is None:
             raise EnrichmentNotFoundError("Enrichment run not found")
         return detail
+
+    async def run(
+        self, request: PhoneEnrichmentRequest, idempotency_key: str
+    ) -> dict[str, Any]:
+        run = await self.start(request, idempotency_key)
+        if run["status"] in {"queued", "running"}:
+            return await self.execute(str(run["id"]))
+        return run
 
     async def _process_synchronous_providers(
         self, run_id: str, item: dict[str, Any], lead: dict[str, Any]
@@ -567,12 +670,18 @@ class PhoneEnrichmentService:
             ),
             "failed": sum(item["status"] == "failed" for item in items),
         }
-        active = any(item["status"] in {"running", "waiting"} for item in items)
+        active = any(
+            item["status"] in {"queued", "running", "waiting"} for item in items
+        )
         if active:
             status = (
                 "waiting"
                 if any(item["status"] == "waiting" for item in items)
-                else "running"
+                else (
+                    "queued"
+                    if any(item["status"] == "queued" for item in items)
+                    else "running"
+                )
             )
         elif counts["failed"] and (
             counts["enriched"] or counts["not_found"] or counts["skipped"]
@@ -670,6 +779,11 @@ class PhoneEnrichmentService:
     def _fingerprint(request: PhoneEnrichmentRequest) -> str:
         payload = {
             "lead_ids": sorted(str(value) for value in request.lead_ids or []),
+            "source_import_run_id": (
+                str(request.source_import_run_id)
+                if request.source_import_run_id is not None
+                else None
+            ),
             "limit": request.limit,
         }
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))

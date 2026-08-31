@@ -2,9 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.auth import AuthenticatedUser, require_authenticated_user
+from app.auth import (
+    AuthenticatedUser,
+    parse_app_role,
+    require_admin_or_sales_lead,
+    require_authenticated_user,
+)
 from app.env import Env, get_env
-from app.models import AppRole, InviteUserRequest, InviteUserResponse
+from app.models import AppRole, InviteUserRequest, InviteUserResponse, SDRListItem
 from app.supabase_client import get_supabase
 from app.utils import normalize_email, utc_now
 from supabase import AsyncClient, AuthApiError
@@ -22,6 +27,9 @@ AuthenticatedUserDependency = Annotated[
 ]
 SupabaseDependency = Annotated[AsyncClient, Depends(get_supabase)]
 EnvDependency = Annotated[Env, Depends(get_env)]
+ManagerDependency = Annotated[
+    AuthenticatedUser, Depends(require_admin_or_sales_lead)
+]
 
 
 def can_invite(inviter_role: AppRole | None, invited_role: AppRole) -> bool:
@@ -40,6 +48,40 @@ def _http_status_for_auth_error(error: AuthApiError) -> int:
     if error.status in {400, 401, 403, 404, 409, 422, 429}:
         return error.status
     return status.HTTP_400_BAD_REQUEST
+
+
+@router.get("/sdrs", response_model=list[SDRListItem])
+async def list_sdrs(
+    supabase: SupabaseDependency,
+    _actor: ManagerDependency,
+) -> list[dict[str, str]]:
+    users = []
+    page = 1
+    per_page = 1000
+    try:
+        while True:
+            batch = await supabase.auth.admin.list_users(
+                page=page, per_page=per_page
+            )
+            users.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+    except AuthApiError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to list SDRs",
+        ) from error
+
+    items = [
+        {"id": user.id, "email": user.email}
+        for user in users
+        if parse_app_role(user.app_metadata) == "sdr"
+        and user.email is not None
+        and user.deleted_at is None
+        and user.banned_until is None
+    ]
+    return sorted(items, key=lambda item: (item["email"].casefold(), item["id"]))
 
 
 @router.post(

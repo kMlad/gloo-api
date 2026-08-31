@@ -27,6 +27,7 @@ def _env(**overrides: Any) -> Env:
         "fullenrich_api_key": SecretStr("fullenrich"),
         "internal_api_token": SecretStr("test-internal-token-with-32-characters"),
         "public_api_base_url": "https://api.example.com",
+        "invite_redirect_url": None,
         "fullenrich_webhook_token": SecretStr(
             "test-fullenrich-webhook-token-32-characters"
         ),
@@ -63,10 +64,17 @@ def _user(
 class AuthAdminStub:
     def __init__(self, invited: User) -> None:
         self.invited = invited
+        self.users = [invited]
         self.invites: list[tuple[str, dict[str, Any] | None]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.invite_error: AuthApiError | None = None
         self.update_error: AuthApiError | None = None
+        self.list_error: AuthApiError | None = None
+
+    async def list_users(self, page=None, per_page=None):
+        if self.list_error is not None:
+            raise self.list_error
+        return self.users
 
     async def invite_user_by_email(
         self, email: str, options: dict[str, Any] | None = None
@@ -287,3 +295,46 @@ async def test_invite_rejects_unknown_role() -> None:
         app, token="jwt", json={"email": "new@example.com", "role": "manager"}
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_sales_lead_can_list_only_sdr_users() -> None:
+    sdr = _user(
+        role="sdr",
+        email="sdr@example.com",
+        user_id="11111111-1111-1111-1111-111111111111",
+    )
+    supabase = SupabaseStub(
+        AuthStub(current_user=_user(role="sales_lead"), invited=sdr)
+    )
+    supabase.auth.admin.users = [sdr, _user(role="admin", email="admin@example.com")]
+    app = _app(supabase)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/api/v1/users/sdrs",
+            headers={"Authorization": "Bearer jwt"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == [{"id": sdr.id, "email": "sdr@example.com"}]
+
+
+@pytest.mark.asyncio
+async def test_sdr_cannot_list_sdr_users() -> None:
+    supabase = SupabaseStub(AuthStub(current_user=_user(role="sdr")))
+    app = _app(supabase)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/api/v1/users/sdrs",
+            headers={"Authorization": "Bearer jwt"},
+        )
+
+    assert response.status_code == 403

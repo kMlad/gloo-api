@@ -66,6 +66,28 @@ def test_campaign_reply_types_migration_is_additive_and_constrained() -> None:
     assert "drop column positive_category" not in migration
 
 
+def test_smartlead_sales_workflow_migration_is_audited_and_private() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_smartlead_sales_workflow.sql")
+    ).read_text()
+
+    assert "create table public.smartlead_import_run_items" in migration
+    assert "unique (run_id, conversation_id)" in migration
+    assert "add column reply_types text[] not null" in migration
+    assert "status in ('queued', 'running'" in migration
+    assert "selection_mode in ('selected', 'eligible', 'import_run')" in migration
+    assert "source_import_run_id uuid" in migration
+    assert "alter table public.smartlead_import_run_items enable row level security" in migration
+    assert (
+        "revoke all on table public.smartlead_import_run_items\n"
+        "    from public, anon, authenticated"
+    ) in migration
+    assert (
+        "grant select, insert, update, delete on table public.smartlead_import_run_items\n"
+        "    to service_role"
+    ) in migration
+
+
 def test_smartlead_lead_conversation_upsert_is_atomic_and_private() -> None:
     migration = next(
         Path("supabase/migrations").glob(
@@ -108,6 +130,21 @@ def test_lead_status_and_notes_migration_is_constrained_and_indexed() -> None:
     ):
         assert f"'{status}'" in migration
     assert "leads_status_source_observed_at_idx" in migration
+
+
+def test_lead_assignment_migration_tracks_owner_and_audit_metadata() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_lead_assignments.sql")
+    ).read_text()
+
+    assert "add column assigned_sdr_id uuid references auth.users(id)" in migration
+    assert "add column assigned_by uuid references auth.users(id)" in migration
+    assert "add column assigned_at timestamptz" in migration
+    assert "leads_assignment_fields_check" in migration
+    assert "leads_assigned_sdr_source_observed_at_idx" in migration
+    assert "leads_assigned_by_idx" in migration
+    assert "assigned_sdr_id uuid references auth.users(id) on delete restrict" in migration
+    assert "grant " not in migration
 
 
 def test_workbook_tables_migration_is_private_and_typed() -> None:

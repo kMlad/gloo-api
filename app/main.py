@@ -176,6 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         smartlead_http,
         env.smartlead_api_key.get_secret_value(),
         max_retries=env.smartlead_max_retries,
+        request_limiter=FixedWindowRateLimiter(max_calls=50).acquire,
     )
     enrichment_repository = EnrichmentRepository(supabase)
     provider_options = {
