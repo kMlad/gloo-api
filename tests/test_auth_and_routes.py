@@ -7,12 +7,15 @@ from pydantic import SecretStr
 from supabase_auth.types import User, UserResponse
 
 from app.dependencies import (
+    get_heyreach_client,
+    get_heyreach_repository,
     get_phone_enrichment_service,
     get_repository,
     get_smartlead_client,
 )
 from app.env import Env, get_env
 from app.main import create_app
+from app.repositories import ConcurrentImportError
 from app.supabase_client import get_supabase
 from supabase import AuthApiError
 
@@ -41,6 +44,7 @@ class LeadRepositoryStub:
         reply_types=None,
         status=None,
         campaign_id=None,
+        heyreach_campaign_id=None,
         import_run_id=None,
         assignment_status=None,
         assigned_sdr_id=None,
@@ -52,6 +56,7 @@ class LeadRepositoryStub:
         self.list_scopes.append(
             {
                 "campaign_id": campaign_id,
+                "heyreach_campaign_id": heyreach_campaign_id,
                 "import_run_id": import_run_id,
                 "assignment_status": assignment_status,
                 "assigned_sdr_id": assigned_sdr_id,
@@ -135,6 +140,9 @@ class LeadRepositoryStub:
         }
 
     async def upsert_reply(self, values):
+        return values
+
+    async def upsert_heyreach_reply(self, values):
         return values
 
     async def assign_leads(self, lead_ids, *, sdr_id, assigned_by):
@@ -339,11 +347,110 @@ class SmartLeadCampaignStub:
         return []
 
 
+class HeyReachClientStub:
+    async def get_campaign(self, campaign_id):
+        return {"id": campaign_id, "name": "HeyReach campaign"}
+
+    async def list_campaigns(self):
+        return []
+
+
+class HeyReachCampaignRepositoryStub:
+    def __init__(self) -> None:
+        self.campaign = None
+        self.import_run = None
+
+    async def upsert_campaign(self, campaign_id, name, enabled):
+        now = datetime.now(UTC).isoformat()
+        self.campaign = {
+            "heyreach_campaign_id": campaign_id,
+            "name": name,
+            "enabled": enabled,
+            "created_at": now,
+            "updated_at": now,
+        }
+        return self.campaign
+
+    async def update_campaign(self, campaign_id, *, enabled):
+        if (
+            self.campaign is None
+            or self.campaign["heyreach_campaign_id"] != campaign_id
+        ):
+            return None
+        if enabled is not None:
+            self.campaign["enabled"] = enabled
+        self.campaign["updated_at"] = datetime.now(UTC).isoformat()
+        return self.campaign
+
+    async def list_campaigns(self, *, enabled_only: bool = False):
+        if self.campaign is None:
+            return []
+        if enabled_only and not self.campaign["enabled"]:
+            return []
+        return [self.campaign]
+
+    async def sync_campaign_catalog(self, campaigns):
+        return campaigns
+
+    async def get_campaign_import_stats(self, campaign_ids):
+        return {}
+
+    async def get_campaigns_by_ids(self, campaign_ids):
+        if self.campaign is None:
+            return []
+        return (
+            [self.campaign]
+            if self.campaign["heyreach_campaign_id"] in campaign_ids
+            else []
+        )
+
+    async def get_import_run_by_idempotency_key(self, key):
+        if self.import_run and self.import_run["idempotency_key"] == key:
+            return self.import_run
+        return None
+
+    async def create_import_run(self, **values):
+        now = datetime.now(UTC).isoformat()
+        self.import_run = {
+            "id": str(uuid4()),
+            "status": "succeeded",
+            **values,
+            "qualifying_conversation_count": 0,
+            "leads_processed": 0,
+            "conversations_processed": 0,
+            "replies_processed": 0,
+            "errors": [],
+            "started_at": now,
+            "completed_at": now,
+        }
+        return self.import_run
+
+    async def get_import_run(self, run_id):
+        if self.import_run and self.import_run["id"] == run_id:
+            return self.import_run
+        return None
+
+    async def list_import_runs(self, *, limit, offset):
+        items = [self.import_run] if self.import_run and offset == 0 else []
+        return items[:limit], 1 if self.import_run else 0
+
+    async def attach_last_enrichments(self, runs):
+        for run in runs:
+            run.setdefault("last_enrichment", None)
+        return runs
+
+
+class ConflictingHeyReachRepository(HeyReachCampaignRepositoryStub):
+    async def create_import_run(self, **values):
+        raise ConcurrentImportError
+
+
 def _env(*, internal_token: str = "test-internal-token-with-32-characters") -> Env:
     return Env(
         supabase_url="http://127.0.0.1:54321",
         supabase_secret_key=SecretStr("secret"),
         smartlead_api_key=SecretStr("smartlead"),
+        heyreach_api_key=SecretStr("heyreach"),
         leadmagic_api_key=SecretStr("leadmagic"),
         prospeo_api_key=SecretStr("prospeo"),
         airscale_api_key=SecretStr("airscale"),
@@ -555,6 +662,7 @@ async def test_sales_lead_filters_and_assigns_exact_unassigned_leads() -> None:
     assert candidates.status_code == 200
     assert repository.list_scopes[0] == {
         "campaign_id": 10,
+        "heyreach_campaign_id": None,
         "import_run_id": None,
         "assignment_status": "unassigned",
         "assigned_sdr_id": None,
@@ -935,3 +1043,201 @@ async def test_internal_token_can_still_list_campaigns() -> None:
     assert unauthenticated.status_code == 401
     assert response.status_code == 200
     assert response.json() == []
+
+
+def _heyreach_auth_app(
+    *,
+    current_user: User | None = None,
+    repository: HeyReachCampaignRepositoryStub | None = None,
+    leads: LeadRepositoryStub | None = None,
+):
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=current_user)
+    )
+    app.dependency_overrides[get_heyreach_repository] = lambda: (
+        repository or HeyReachCampaignRepositoryStub()
+    )
+    app.dependency_overrides[get_heyreach_client] = lambda: HeyReachClientStub()
+    if leads is not None:
+        app.dependency_overrides[get_repository] = lambda: leads
+    return app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "sales_lead"])
+async def test_admin_and_sales_lead_can_list_and_import_heyreach_campaigns(
+    role: str,
+) -> None:
+    repository = HeyReachCampaignRepositoryStub()
+    now = datetime.now(UTC).isoformat()
+    repository.campaign = {
+        "heyreach_campaign_id": 10,
+        "name": "Outbound",
+        "enabled": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    leads = LeadRepositoryStub()
+    app = _heyreach_auth_app(
+        current_user=_user(role=role), repository=repository, leads=leads
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        campaigns = await client.get("/api/v1/heyreach/campaigns", headers=headers)
+        imported = await client.post(
+            "/api/v1/heyreach/imports",
+            headers={**headers, "Idempotency-Key": "heyreach-import-key"},
+            json={"campaign_ids": [10]},
+        )
+        import_id = imported.json()["id"]
+        import_detail = await client.get(
+            f"/api/v1/heyreach/imports/{import_id}", headers=headers
+        )
+        import_leads = await client.get(
+            f"/api/v1/heyreach/imports/{import_id}/leads", headers=headers
+        )
+        write_campaign = await client.post(
+            "/api/v1/heyreach/campaigns",
+            headers=headers,
+            json={"heyreach_campaign_id": 11},
+        )
+
+    assert campaigns.status_code == 200
+    assert campaigns.json()[0]["heyreach_campaign_id"] == 10
+    assert imported.status_code == 202
+    assert imported.json()["campaign_ids"] == [10]
+    assert import_detail.status_code == 200
+    assert import_detail.json()["last_enrichment"] is None
+    assert import_leads.status_code == 200
+    assert leads.list_scopes[-1]["import_run_id"] == import_id
+    assert write_campaign.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_internal_token_can_add_and_update_heyreach_campaigns() -> None:
+    repository = HeyReachCampaignRepositoryStub()
+    app = _heyreach_auth_app(repository=repository)
+    headers = {"Authorization": "Bearer test-internal-token-with-32-characters"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        created = await client.post(
+            "/api/v1/heyreach/campaigns",
+            headers=headers,
+            json={"heyreach_campaign_id": 10},
+        )
+        updated = await client.patch(
+            "/api/v1/heyreach/campaigns/10",
+            headers=headers,
+            json={"enabled": False},
+        )
+        missing = await client.patch(
+            "/api/v1/heyreach/campaigns/11",
+            headers=headers,
+            json={"enabled": True},
+        )
+
+    assert created.status_code == 200
+    assert created.json()["heyreach_campaign_id"] == 10
+    assert created.json()["name"] == "HeyReach campaign"
+    assert updated.status_code == 200
+    assert updated.json()["enabled"] is False
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["sdr", None])
+async def test_sdr_and_unroled_users_cannot_import_heyreach_campaigns(
+    role: str | None,
+) -> None:
+    app = _heyreach_auth_app(
+        current_user=_user(role=role),
+        repository=HeyReachCampaignRepositoryStub(),
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        campaigns = await client.get("/api/v1/heyreach/campaigns", headers=headers)
+        imported = await client.post(
+            "/api/v1/heyreach/imports",
+            headers={**headers, "Idempotency-Key": "heyreach-import-key"},
+            json={"campaign_ids": [10]},
+        )
+
+    assert campaigns.status_code == 403
+    assert imported.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_overlapping_heyreach_import_returns_conflict() -> None:
+    now = datetime.now(UTC).isoformat()
+    repository = ConflictingHeyReachRepository()
+    repository.campaign = {
+        "heyreach_campaign_id": 10,
+        "name": "Outbound",
+        "enabled": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    app = _heyreach_auth_app(
+        current_user=_user(role="admin"), repository=repository
+    )
+    headers = {
+        "Authorization": "Bearer user-jwt",
+        "Idempotency-Key": "heyreach-overlap-key",
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            "/api/v1/heyreach/imports",
+            headers=headers,
+            json={"campaign_ids": [10]},
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_lead_list_rejects_combined_smartlead_and_heyreach_campaign_filters() -> (
+    None
+):
+    repository = LeadRepositoryStub()
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=_user(role="sales_lead"))
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        heyreach_only = await client.get(
+            "/api/v1/leads?heyreach_campaign_id=10", headers=headers
+        )
+        combined = await client.get(
+            "/api/v1/leads?campaign_id=10&heyreach_campaign_id=10",
+            headers=headers,
+        )
+
+    assert heyreach_only.status_code == 200
+    assert combined.status_code == 422
+    assert repository.list_scopes[0]["heyreach_campaign_id"] == 10
+    assert repository.list_scopes[0]["campaign_id"] is None

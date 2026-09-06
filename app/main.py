@@ -8,6 +8,8 @@ from perplexity import AsyncPerplexity
 from starlette.types import ASGIApp
 
 from app.env import get_env, load_cors_allowed_origins
+from app.heyreach.client import HeyReachClient
+from app.heyreach.repository import HeyReachRepository
 from app.phone_enrichment.providers import (
     AirScaleClient,
     FullEnrichClient,
@@ -24,6 +26,7 @@ from app.phone_enrichment.routes import (
 )
 from app.phone_enrichment.service import PhoneEnrichmentService
 from app.repositories import Repository
+from app.routes.heyreach import router as heyreach_router
 from app.routes.leads import router as leads_router
 from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
@@ -81,6 +84,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=httpx.Timeout(env.smartlead_timeout_seconds),
         headers={"Accept": "application/json"},
     )
+    heyreach_http = httpx.AsyncClient(
+        base_url=env.heyreach_base_url.rstrip("/") + "/",
+        timeout=httpx.Timeout(env.heyreach_timeout_seconds),
+        headers={"Accept": "application/json"},
+    )
     provider_timeout = httpx.Timeout(
         connect=5.0,
         read=env.phone_provider_timeout_seconds,
@@ -109,6 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.supabase = supabase
     app.state.repository = Repository(supabase)
+    app.state.heyreach_repository = HeyReachRepository(supabase)
     sheriff_agent = None
     perplexity_client = None
     if env.perplexity_api_key is not None:
@@ -203,6 +212,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_retries=env.smartlead_max_retries,
         request_limiter=FixedWindowRateLimiter(max_calls=50).acquire,
     )
+    app.state.heyreach = HeyReachClient(
+        heyreach_http,
+        env.heyreach_api_key.get_secret_value(),
+        max_retries=env.heyreach_max_retries,
+        request_limiter=FixedWindowRateLimiter(max_calls=250).acquire,
+    )
     enrichment_repository = EnrichmentRepository(supabase)
     provider_options = {
         "max_retries": env.phone_provider_max_retries,
@@ -240,6 +255,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await smartlead_http.aclose()
+        await heyreach_http.aclose()
         await leadmagic_http.aclose()
         await prospeo_http.aclose()
         await airscale_http.aclose()
@@ -269,6 +285,7 @@ def create_app(
         cors_allowed_origins=origins,
     )
     application.include_router(smartlead_router)
+    application.include_router(heyreach_router)
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)
     application.include_router(phone_enrichment_webhook_router)

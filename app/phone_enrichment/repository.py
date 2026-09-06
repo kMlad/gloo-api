@@ -182,27 +182,32 @@ class EnrichmentRepository:
         return await self._attach_replies(response.data)
 
     async def get_import_run_leads(self, run_id: str) -> list[dict[str, Any]]:
-        run_response = await (
-            self._db.table("smartlead_import_runs")
-            .select("status")
-            .eq("id", run_id)
-            .limit(1)
-            .execute()
-        )
-        if not run_response.data:
-            raise ValueError("Import run was not found")
-        if run_response.data[0]["status"] not in {"succeeded", "partial"}:
-            raise ValueError("Import run must be completed before enrichment")
-        items_response = await (
-            self._db.table("smartlead_import_run_items")
-            .select("lead_id")
-            .eq("run_id", run_id)
-            .execute()
-        )
-        lead_ids = list(
-            dict.fromkeys(str(item["lead_id"]) for item in items_response.data)
-        )
-        return await self.get_selected_leads(lead_ids)
+        for table, items_table in (
+            ("smartlead_import_runs", "smartlead_import_run_items"),
+            ("heyreach_import_runs", "heyreach_import_run_items"),
+        ):
+            run_response = await (
+                self._db.table(table)
+                .select("status")
+                .eq("id", run_id)
+                .limit(1)
+                .execute()
+            )
+            if not run_response.data:
+                continue
+            if run_response.data[0]["status"] not in {"succeeded", "partial"}:
+                raise ValueError("Import run must be completed before enrichment")
+            items_response = await (
+                self._db.table(items_table)
+                .select("lead_id")
+                .eq("run_id", run_id)
+                .execute()
+            )
+            lead_ids = list(
+                dict.fromkeys(str(item["lead_id"]) for item in items_response.data)
+            )
+            return await self.get_selected_leads(lead_ids)
+        raise ValueError("Import run was not found")
 
     async def _attach_replies(
         self, leads: list[dict[str, Any]]
@@ -210,27 +215,33 @@ class EnrichmentRepository:
         if not leads:
             return []
         lead_ids = [str(item["id"]) for item in leads]
-        conversations_response = await (
-            self._db.table("smartlead_conversations")
-            .select("id,lead_id")
-            .in_("lead_id", lead_ids)
-            .execute()
-        )
-        conversation_to_lead = {
-            str(item["id"]): str(item["lead_id"])
-            for item in conversations_response.data
-        }
-        replies: list[dict[str, Any]] = []
-        if conversation_to_lead:
-            replies_response = await (
-                self._db.table("smartlead_replies")
-                .select("id,conversation_id,body,received_at")
-                .in_("conversation_id", list(conversation_to_lead))
-                .eq("direction", "inbound")
-                .order("received_at", desc=True)
+        conversation_to_lead: dict[str, str] = {}
+        for table in ("smartlead_conversations", "heyreach_conversations"):
+            conversations_response = await (
+                self._db.table(table)
+                .select("id,lead_id")
+                .in_("lead_id", lead_ids)
                 .execute()
             )
-            replies = replies_response.data
+            conversation_to_lead.update(
+                {
+                    str(item["id"]): str(item["lead_id"])
+                    for item in conversations_response.data
+                }
+            )
+        replies: list[dict[str, Any]] = []
+        if conversation_to_lead:
+            conversation_ids = list(conversation_to_lead)
+            for table in ("smartlead_replies", "heyreach_replies"):
+                replies_response = await (
+                    self._db.table(table)
+                    .select("id,conversation_id,body,received_at")
+                    .in_("conversation_id", conversation_ids)
+                    .eq("direction", "inbound")
+                    .order("received_at", desc=True)
+                    .execute()
+                )
+                replies.extend(replies_response.data)
 
         replies_by_lead: dict[str, list[dict[str, Any]]] = {}
         for reply in replies:

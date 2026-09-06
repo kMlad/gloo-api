@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from app.heyreach.client import HeyReachClient, HeyReachError
 from app.models import ImportRequest, ReplyType
 from app.repositories import ConcurrentImportError, Repository
 from app.smartlead.client import SmartLeadClient, SmartLeadError
@@ -63,9 +64,11 @@ class LeadService:
         smartlead: SmartLeadClient,
         *,
         chat_refresh_ttl_seconds: int,
+        heyreach: HeyReachClient | None = None,
     ) -> None:
         self._repository = repository
         self._smartlead = smartlead
+        self._heyreach = heyreach
         self._ttl = timedelta(seconds=chat_refresh_ttl_seconds)
 
     async def get_detail(
@@ -94,21 +97,35 @@ class LeadService:
     async def _refresh_chat(
         self, lead_id: str, conversations: list[dict[str, Any]]
     ) -> None:
-        targets = [
+        smartlead_targets = [
             conversation
             for conversation in conversations
             if conversation.get("smartlead_campaign_id") is not None
             and conversation.get("smartlead_lead_id") not in (None, "")
         ]
-        if not targets:
+        heyreach_targets = [
+            conversation
+            for conversation in conversations
+            if conversation.get("heyreach_campaign_id") is not None
+            and conversation.get("linkedin_account_id") not in (None, "")
+            and conversation.get("heyreach_conversation_id") not in (None, "")
+            and not str(conversation.get("heyreach_conversation_id", "")).startswith(
+                "fallback:"
+            )
+        ]
+        if not smartlead_targets and not heyreach_targets:
             logger.warning(
-                "SmartLead chat refresh skipped because the lead has no usable "
+                "Chat refresh skipped because the lead has no usable "
                 "conversation metadata",
                 extra={"lead_id": lead_id},
             )
             return
         results = await asyncio.gather(
-            *[self._fetch_and_store(conversation) for conversation in targets]
+            *[self._fetch_and_store(conversation) for conversation in smartlead_targets],
+            *[
+                self._fetch_and_store_heyreach(conversation)
+                for conversation in heyreach_targets
+            ],
         )
         if not all(results):
             return
@@ -127,6 +144,75 @@ class LeadService:
                 continue
             try:
                 await self._upsert_message(str(conversation["id"]), message)
+            except ValueError:
+                continue
+        return True
+
+    async def _fetch_and_store_heyreach(self, conversation: dict[str, Any]) -> bool:
+        if self._heyreach is None:
+            return True
+        try:
+            chatroom = await self._heyreach.get_chatroom(
+                account_id=int(conversation["linkedin_account_id"]),
+                conversation_id=str(conversation["heyreach_conversation_id"]),
+            )
+        except HeyReachError:
+            return False
+        messages = chatroom.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        from app.heyreach.service import HeyReachImportService
+
+        sender_name = HeyReachImportService.linkedin_sender_name(
+            conversation.get("linkedin_sender_name"),
+            chatroom,
+        )
+        if not sender_name:
+            account_id = conversation.get("linkedin_account_id")
+            try:
+                account = await self._heyreach.get_linkedin_account(int(account_id))
+            except (HeyReachError, TypeError, ValueError):
+                account = None
+            sender_name = HeyReachImportService.linkedin_sender_name(account)
+
+        if sender_name and not conversation.get("linkedin_sender_name"):
+            await self._repository.update_heyreach_conversation(
+                str(conversation["id"]),
+                {"linkedin_sender_name": sender_name},
+            )
+            conversation["linkedin_sender_name"] = sender_name
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            try:
+                received_at = HeyReachImportService._message_received_at(message)
+                message_id = message.get("id") or message.get("messageId")
+                direction = HeyReachImportService._message_direction(message)
+                await self._repository.upsert_heyreach_reply(
+                    {
+                        "conversation_id": conversation["id"],
+                        "heyreach_message_id": (
+                            str(message_id) if message_id else None
+                        ),
+                        "dedupe_key": HeyReachImportService._reply_dedupe_key(
+                            conversation_id=str(conversation["id"]),
+                            message=message,
+                            received_at=received_at,
+                        ),
+                        "subject": message.get("subject"),
+                        "body": HeyReachImportService._message_body(message),
+                        "sent_from": HeyReachImportService._sent_from(
+                            message,
+                            direction=direction,
+                            sender_name=sender_name,
+                        ),
+                        "sent_to": message.get("sent_to"),
+                        "received_at": to_iso(received_at),
+                        "direction": direction,
+                        "message_properties": message,
+                    }
+                )
             except ValueError:
                 continue
         return True

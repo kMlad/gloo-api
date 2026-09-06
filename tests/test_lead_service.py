@@ -42,6 +42,19 @@ class FakeLeadRepository:
         self.replies.append(reply)
         return deepcopy(reply)
 
+    async def upsert_heyreach_reply(self, values: dict) -> dict:
+        return await self.upsert_reply(values)
+
+    async def update_heyreach_conversation(self, conversation_id: str, values: dict) -> dict:
+        conversation = next(
+            (item for item in self.conversations if str(item["id"]) == conversation_id),
+            None,
+        )
+        if conversation is None:
+            return values
+        conversation.update(values)
+        return deepcopy(conversation)
+
     async def mark_chat_refreshed(self, lead_id: str) -> None:
         self.mark_calls += 1
         if self.lead is not None:
@@ -254,3 +267,73 @@ async def test_conversations_without_smartlead_lead_id_are_skipped() -> None:
     assert replies_by_id["skip"] == []
     assert replies_by_id["keep"][0]["direction"] == "outbound"
     assert replies_by_id["keep"][0]["body"] == "Follow up"
+
+
+class FakeHeyReach:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+
+    async def get_chatroom(self, *, account_id: int, conversation_id: str):
+        self.calls.append((account_id, conversation_id))
+        return {
+            "linkedInAccount": {
+                "id": account_id,
+                "firstName": "Alex",
+                "lastName": "Sender",
+            },
+            "messages": [
+                {
+                    "id": "out-1",
+                    "body": "Hello from LinkedIn",
+                    "isFromMe": True,
+                    "createdAt": "2026-08-31T10:00:00Z",
+                },
+                {
+                    "id": "in-1",
+                    "body": "Interested",
+                    "isFromMe": False,
+                    "createdAt": "2026-09-01T10:00:00Z",
+                    "sender": "Pat Lee",
+                },
+            ]
+        }
+
+    async def get_linkedin_account(self, account_id: int):
+        return {"id": account_id, "firstName": "Alex", "lastName": "Sender"}
+
+
+def _heyreach_conversation(**overrides) -> dict:
+    conversation = {
+        "id": "heyreach-conversation-1",
+        "heyreach_campaign_id": 10,
+        "linkedin_account_id": 7,
+        "heyreach_conversation_id": "conv-1",
+    }
+    conversation.update(overrides)
+    return conversation
+
+
+@pytest.mark.asyncio
+async def test_stale_cache_refreshes_heyreach_messages() -> None:
+    repository = FakeLeadRepository(
+        lead={"id": "lead-1", "chat_refreshed_at": None},
+        conversations=[_heyreach_conversation()],
+    )
+    heyreach = FakeHeyReach()
+    service = LeadService(
+        repository,
+        FakeSmartLead(),
+        chat_refresh_ttl_seconds=3600,
+        heyreach=heyreach,
+    )
+
+    detail = await service.get_detail("lead-1")
+
+    assert heyreach.calls == [(7, "conv-1")]
+    assert repository.mark_calls == 1
+    replies = detail["conversations"][0]["replies"]
+    assert [item["direction"] for item in replies] == ["outbound", "inbound"]
+    assert replies[0]["sent_from"] == "Alex Sender"
+    assert replies[1]["sent_from"] == "Pat Lee"
+    assert replies[1]["body"] == "Interested"
+    assert detail["conversations"][0]["linkedin_sender_name"] == "Alex Sender"

@@ -32,6 +32,7 @@ class Env(BaseSettings):
     supabase_url: str
     supabase_secret_key: SecretStr = Field(min_length=1)
     smartlead_api_key: SecretStr = Field(min_length=1)
+    heyreach_api_key: SecretStr = Field(min_length=1)
     leadmagic_api_key: SecretStr = Field(min_length=1)
     prospeo_api_key: SecretStr = Field(min_length=1)
     airscale_api_key: SecretStr = Field(min_length=1)
@@ -46,6 +47,10 @@ class Env(BaseSettings):
     smartlead_max_retries: int = Field(default=3, ge=0, le=10)
     smartlead_import_limit: int = Field(default=1000, gt=0, le=10_000)
     smartlead_chat_refresh_ttl_seconds: int = Field(default=3600, ge=0)
+    heyreach_base_url: str = "https://api.heyreach.io/api/public"
+    heyreach_timeout_seconds: float = Field(default=30.0, gt=0)
+    heyreach_max_retries: int = Field(default=3, ge=0, le=10)
+    heyreach_import_limit: int = Field(default=1000, gt=0, le=10_000)
     leadmagic_base_url: str = "https://api.leadmagic.io"
     prospeo_base_url: str = "https://api.prospeo.io"
     airscale_base_url: str = "https://api.airscale.io"

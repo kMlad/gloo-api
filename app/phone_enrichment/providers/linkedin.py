@@ -15,3 +15,16 @@ def person_linkedin_url(value: Any) -> str | None:
     if len(path_parts) != 2 or path_parts[0].casefold() != "in":
         return None
     return text
+
+
+def canonical_linkedin_profile(value: Any) -> str | None:
+    """Return a stable person profile URL used for lead identity."""
+    if person_linkedin_url(value) is None:
+        return None
+    text = str(value or "").strip()
+    parsed = urlparse(text if "://" in text else "https://" + text)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    slug = path_parts[1].casefold().removesuffix("/")
+    if not slug:
+        return None
+    return f"https://www.linkedin.com/in/{slug}"

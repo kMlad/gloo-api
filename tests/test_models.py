@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -5,9 +7,11 @@ from app.models import (
     CampaignCreate,
     CampaignResponse,
     CampaignUpdate,
+    HeyReachImportRequest,
     ImportRequest,
     InviteUserRequest,
     LeadAssignmentRequest,
+    LeadSource,
     LeadUpdate,
 )
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
@@ -116,3 +120,45 @@ def test_invite_user_request_requires_email_and_known_role() -> None:
         InviteUserRequest(email="person@example.com", role="manager")
     with pytest.raises(ValidationError):
         InviteUserRequest(email="person@example.com")
+
+
+def test_heyreach_import_request_validates_campaigns_and_time_range() -> None:
+    assert HeyReachImportRequest().campaign_ids is None
+    assert HeyReachImportRequest(campaign_ids=[10]).campaign_ids == [10]
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(campaign_ids=[])
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(campaign_ids=[10, 10])
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(
+            reply_time_from=datetime(2026, 9, 1, tzinfo=UTC).replace(tzinfo=None)
+        )
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(
+            reply_time_from=datetime(2026, 9, 2, tzinfo=UTC),
+            reply_time_to=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+
+
+def test_lead_source_requires_a_campaign_id() -> None:
+    qualified_at = datetime(2026, 9, 1, tzinfo=UTC)
+    smartlead = LeadSource(
+        smartlead_campaign_id=10,
+        name="SmartLead",
+        reply_type="positive",
+        qualified_at=qualified_at,
+    )
+    heyreach = LeadSource(
+        heyreach_campaign_id=20,
+        name="HeyReach",
+        reply_type="positive",
+        qualified_at=qualified_at,
+    )
+    assert smartlead.smartlead_campaign_id == 10
+    assert heyreach.heyreach_campaign_id == 20
+    with pytest.raises(ValidationError):
+        LeadSource(
+            name="Unknown",
+            reply_type="positive",
+            qualified_at=qualified_at,
+        )

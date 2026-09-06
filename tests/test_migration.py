@@ -378,3 +378,65 @@ def test_campaign_import_scopes_replace_the_global_lock() -> None:
         "to service_role"
     ) in migration
 
+
+def test_heyreach_import_migration_is_private_and_identity_aware() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_heyreach_campaign_imports.sql")
+    ).read_text()
+    tables = [
+        "heyreach_campaigns",
+        "heyreach_conversations",
+        "heyreach_replies",
+        "heyreach_import_runs",
+        "heyreach_import_run_items",
+        "heyreach_import_run_scopes",
+    ]
+    for table in tables:
+        assert f"alter table public.{table} enable row level security" in migration
+        assert (
+            f"revoke all on table public.{table}\n"
+            "    from public, anon, authenticated"
+        ) in migration
+        assert f"revoke all on table public.{table} from service_role" in migration
+        assert (
+            f"grant select, insert, update, delete on table public.{table}\n"
+            "    to service_role"
+        ) in migration
+
+    assert "add column linkedin_profile_normalized text" in migration
+    assert "leads_email_phone_or_linkedin_check" in migration
+    assert "leads_linkedin_profile_normalized_idx" in migration
+    assert "drop constraint if exists phone_enrichment_runs_source_import_run_id_fkey" in (
+        migration
+    )
+    assert "heyreach_import_run_scopes_one_active_idx" in migration
+    assert "create or replace function public.latest_heyreach_imports" in migration
+    assert "create or replace function public.upsert_heyreach_lead_conversation" in (
+        migration
+    )
+    assert "create or replace function public.sync_heyreach_import_run_scopes" in (
+        migration
+    )
+    assert (
+        "revoke execute on function public.upsert_heyreach_lead_conversation(jsonb, jsonb)\n"
+        "    from public, anon, authenticated"
+    ) in migration
+    assert (
+        "grant execute on function public.upsert_heyreach_lead_conversation(jsonb, jsonb)\n"
+        "    to service_role"
+    ) in migration
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration
+
+
+def test_heyreach_sender_name_migration_is_additive() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_heyreach_linkedin_sender_name.sql")
+    ).read_text()
+    assert "add column linkedin_sender_name text" in migration
+    assert "create or replace function public.upsert_heyreach_lead_conversation" in (
+        migration
+    )
+    assert "linkedin_sender_name = coalesce(" in migration
+    assert "drop column" not in migration
+

@@ -171,11 +171,97 @@ class ImportRunListResponse(BaseModel):
     offset: int
 
 
+class HeyReachCampaignCreate(BaseModel):
+    heyreach_campaign_id: int = Field(gt=0)
+    enabled: bool = True
+
+
+class HeyReachCampaignUpdate(BaseModel):
+    enabled: bool
+
+
+class HeyReachCampaignResponse(BaseModel):
+    heyreach_campaign_id: int
+    name: str
+    enabled: bool
+    status: str | None = None
+    ever_imported: bool = False
+    imported_lead_count: int = 0
+    last_imported_at: datetime | None = None
+    last_import_run_id: UUID | None = None
+    last_import: CampaignLastImport | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class HeyReachImportRequest(BaseModel):
+    campaign_ids: list[int] | None = None
+    reply_time_from: datetime | None = None
+    reply_time_to: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> "HeyReachImportRequest":
+        if self.campaign_ids is not None:
+            if not self.campaign_ids:
+                raise ValueError("campaign_ids must not be empty")
+            if len(set(self.campaign_ids)) != len(self.campaign_ids):
+                raise ValueError("campaign_ids must not contain duplicates")
+            if any(campaign_id <= 0 for campaign_id in self.campaign_ids):
+                raise ValueError("campaign_ids must contain positive integers")
+
+        for value in (self.reply_time_from, self.reply_time_to):
+            if value is not None and value.tzinfo is None:
+                raise ValueError("reply time filters must include a timezone")
+
+        if (
+            self.reply_time_from is not None
+            and self.reply_time_to is not None
+            and self.reply_time_from >= self.reply_time_to
+        ):
+            raise ValueError("reply_time_from must be before reply_time_to")
+        return self
+
+
+class HeyReachImportRunResponse(BaseModel):
+    id: UUID
+    status: Literal[
+        "queued", "running", "succeeded", "partial", "failed", "rejected"
+    ]
+    campaign_ids: list[int]
+    reply_time_from: datetime | None
+    reply_time_to: datetime | None
+    requested_by: UUID | None = None
+    idempotency_key: str | None = None
+    max_conversations: int
+    qualifying_conversation_count: int
+    leads_processed: int
+    conversations_processed: int
+    replies_processed: int
+    errors: list[dict[str, Any]]
+    started_at: datetime
+    completed_at: datetime | None
+    last_enrichment: PhoneEnrichmentStatus | None = None
+
+
+class HeyReachImportRunListResponse(BaseModel):
+    items: list[HeyReachImportRunResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class LeadSource(BaseModel):
-    smartlead_campaign_id: int
+    smartlead_campaign_id: int | None = None
+    heyreach_campaign_id: int | None = None
     name: str
     reply_type: ReplyType | None
     qualified_at: datetime
+
+    @model_validator(mode="after")
+    def validate_campaign_source(self) -> "LeadSource":
+        if self.smartlead_campaign_id is None and self.heyreach_campaign_id is None:
+            raise ValueError("a campaign id is required")
+        return self
 
 
 class LeadListItem(BaseModel):

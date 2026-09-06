@@ -1,7 +1,7 @@
 # Gloo API
 
-FastAPI service for discovering SmartLead campaigns, importing positive and
-out-of-office replies into Supabase, and enriching the imported leads with phone
+FastAPI service for discovering SmartLead and HeyReach campaigns, importing
+qualifying replies into Supabase, and enriching the imported leads with phone
 numbers. Import and phone enrichment are separate, asynchronous runs.
 
 ## Configuration
@@ -12,6 +12,7 @@ Copy `.env.example` to `.env.local` and provide:
 - `RESEND_API_KEY` and a verified `RESEND_FROM_EMAIL` for Supabase Auth email
   delivery
 - `SMARTLEAD_API_KEY`
+- `HEYREACH_API_KEY`
 - `LEADMAGIC_API_KEY`, `PROSPEO_API_KEY`, `AIRSCALE_API_KEY`, and
   `FULLENRICH_API_KEY`
 - a long random `INTERNAL_API_TOKEN`
@@ -145,14 +146,55 @@ Date filters apply to SmartLead reply timestamps, not local lead creation dates,
 so a creation-date cutoff is not sufficient to repair an older reply batch.
 
 List imported leads with `GET /api/v1/leads` (user access token). Filters include
-`campaign_id`, `import_run_id`, `status`, singular `reply_type`, and repeated
-`reply_types`, for example
-`?reply_types=positive&reply_types=ooo&campaign_id=12345`. Every list item
-includes `source_campaigns` so the UI can show where and why the lead qualified.
+`campaign_id` (SmartLead), `heyreach_campaign_id`, `import_run_id`, `status`,
+singular `reply_type`, and repeated `reply_types`. `campaign_id` and
+`heyreach_campaign_id` cannot be combined. Every list item includes
+`source_campaigns` so the UI can show where and why the lead qualified.
 Retrieve complete canonical, campaign-specific, custom-property, and full
-SmartLead chat history (inbound and outbound) with
-`GET /api/v1/leads/{lead_id}`. Cached threads are refreshed from SmartLead when
-older than `SMARTLEAD_CHAT_REFRESH_TTL_SECONDS` (default 1 hour).
+chat history (inbound and outbound) with `GET /api/v1/leads/{lead_id}`. Cached
+SmartLead and HeyReach threads are refreshed when older than
+`SMARTLEAD_CHAT_REFRESH_TTL_SECONDS` (default 1 hour).
+
+## HeyReach workflow
+
+Discover HeyReach campaigns and see which ones have already supplied imported
+leads. HeyReach imports LinkedIn replies (`MessageReply` / InMail replies), the
+same sales-handoff role as SmartLead positive replies. LinkedIn profiles are
+enough to create a lead; email is optional.
+
+```shell
+curl http://127.0.0.1:8000/api/v1/heyreach/campaigns \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN"
+```
+
+Queue a replied-lead import for selected campaigns:
+
+```shell
+curl -X POST http://127.0.0.1:8000/api/v1/heyreach/imports \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Idempotency-Key: heyreach-import-2026-09-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"campaign_ids": [90486]}'
+```
+
+An import may also specify timezone-aware `reply_time_from` and `reply_time_to`
+values. Omitting `campaign_ids` imports all campaigns whose legacy `enabled`
+flag is true. The endpoint returns **202** with a durable run record; only one
+import may be queued or running for the same campaign at a time. Imports over
+`HEYREACH_IMPORT_LIMIT` are rejected before conversation histories are read.
+HeyReach calls are throttled below its documented 300 requests/minute limit.
+
+Inspect import history and the exact leads captured by a run:
+
+```text
+GET /api/v1/heyreach/imports?limit=25&offset=0
+GET /api/v1/heyreach/imports/{run_id}
+GET /api/v1/heyreach/imports/{run_id}/leads
+GET /api/v1/phone-enrichments?source_import_run_id={run_id}
+```
+
+Phone enrichment uses the same `source_import_run_id` contract as SmartLead.
+HeyReach leads typically have LinkedIn URLs, which the waterfall already uses.
 
 ## Lead assignment
 
@@ -186,7 +228,7 @@ routes. SDR updates remain limited to the existing `status` and `notes` fields.
 ## Phone enrichment
 
 Queue phone enrichment for the exact lead snapshot from a completed SmartLead
-import (internal token or an admin / sales-lead JWT):
+or HeyReach import (internal token or an admin / sales-lead JWT):
 
 ```shell
 curl -X POST http://127.0.0.1:8000/api/v1/phone-enrichments \

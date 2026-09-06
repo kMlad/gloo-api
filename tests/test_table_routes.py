@@ -22,6 +22,7 @@ def _env() -> Env:
         supabase_url="http://127.0.0.1:54321",
         supabase_secret_key=SecretStr("secret"),
         smartlead_api_key=SecretStr("smartlead"),
+        heyreach_api_key=SecretStr("heyreach"),
         leadmagic_api_key=SecretStr("leadmagic"),
         prospeo_api_key=SecretStr("prospeo"),
         airscale_api_key=SecretStr("airscale"),

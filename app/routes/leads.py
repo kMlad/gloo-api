@@ -9,7 +9,9 @@ from fastapi import (
     HTTPException,
     Query,
     UploadFile,
-    status,
+)
+from fastapi import (
+    status as http_status,
 )
 from pydantic import ValidationError
 
@@ -19,8 +21,13 @@ from app.auth import (
     require_admin_or_sales_lead,
     require_lead_user,
 )
-from app.dependencies import get_repository, get_smartlead_client
+from app.dependencies import (
+    get_optional_heyreach_client,
+    get_repository,
+    get_smartlead_client,
+)
 from app.env import Env, get_env
+from app.heyreach.client import HeyReachClient
 from app.lead_csv import (
     LeadCsvMapping,
     LeadCsvMappingError,
@@ -56,6 +63,9 @@ router = APIRouter(
 
 RepositoryDependency = Annotated[Repository, Depends(get_repository)]
 SmartLeadDependency = Annotated[SmartLeadClient, Depends(get_smartlead_client)]
+HeyReachDependency = Annotated[
+    HeyReachClient | None, Depends(get_optional_heyreach_client)
+]
 EnvDependency = Annotated[Env, Depends(get_env)]
 LeadUserDependency = Annotated[AuthenticatedUser, Depends(require_lead_user)]
 ManagerDependency = Annotated[
@@ -69,7 +79,7 @@ async def _validate_sdr(supabase: AsyncClient, sdr_id: UUID) -> None:
         response = await supabase.auth.admin.get_user_by_id(str(sdr_id))
     except AuthApiError as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Target user is not an active SDR",
         ) from error
     user = response.user
@@ -79,7 +89,7 @@ async def _validate_sdr(supabase: AsyncClient, sdr_id: UUID) -> None:
         or user.banned_until is not None
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Target user is not an active SDR",
         )
 
@@ -94,14 +104,20 @@ async def list_leads(
     reply_types: list[ReplyType] | None = Query(default=None),
     status: LeadStatus | None = Query(default=None),
     campaign_id: int | None = Query(default=None, gt=0),
+    heyreach_campaign_id: int | None = Query(default=None, gt=0),
     import_run_id: UUID | None = Query(default=None),
     assignment_status: AssignmentStatus | None = Query(default=None),
     assigned_sdr_id: UUID | None = Query(default=None),
 ) -> dict:
     if assignment_status == "unassigned" and assigned_sdr_id is not None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="assigned_sdr_id cannot be combined with unassigned leads",
+        )
+    if campaign_id is not None and heyreach_campaign_id is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="campaign_id and heyreach_campaign_id are mutually exclusive",
         )
     selected_reply_types = list(reply_types or [])
     if reply_type is not None and reply_type not in selected_reply_types:
@@ -112,6 +128,7 @@ async def list_leads(
         reply_types=selected_reply_types or None,
         status=status,
         campaign_id=campaign_id,
+        heyreach_campaign_id=heyreach_campaign_id,
         import_run_id=str(import_run_id) if import_run_id is not None else None,
         assignment_status=assignment_status,
         assigned_sdr_id=(
@@ -149,7 +166,7 @@ async def assign_leads(
 
 def _csv_http_error(error: Exception) -> HTTPException:
     return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=str(error),
     )
 
@@ -174,7 +191,7 @@ async def import_lead_csv(
         parsed_mapping = LeadCsvMapping.model_validate_json(mapping)
     except ValidationError as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=error.errors(),
         ) from error
     content = await file.read()
@@ -194,12 +211,14 @@ async def get_lead(
     lead_id: UUID,
     repository: RepositoryDependency,
     smartlead: SmartLeadDependency,
+    heyreach: HeyReachDependency,
     env: EnvDependency,
     actor: LeadUserDependency,
 ) -> dict:
     result = await LeadService(
         repository,
         smartlead,
+        heyreach=heyreach,
         chat_refresh_ttl_seconds=env.smartlead_chat_refresh_ttl_seconds,
     ).get_detail(
         str(lead_id), assigned_sdr_id=actor.id if actor.role == "sdr" else None

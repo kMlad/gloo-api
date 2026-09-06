@@ -149,6 +149,7 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
                     ]
                 )
             ],
+            "heyreach_conversations": [SimpleNamespace(data=[])],
         }
     )
 
@@ -203,6 +204,74 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
     assert status_filter_index < range_index
     assert campaign_filter_index < range_index
     assert assignment_filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_heyreach_campaign_filter_joins_conversations() -> None:
+    lead = {
+        "id": "lead-1",
+        "email": None,
+        "source_observed_at": "2026-09-01T10:00:00Z",
+        "heyreach_conversations": [{"heyreach_campaign_id": 10}],
+    }
+    database = DatabaseStub(
+        {
+            "leads": [SimpleNamespace(data=[lead], count=1)],
+            "smartlead_conversations": [SimpleNamespace(data=[])],
+            "heyreach_conversations": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "id": "heyreach-conversation-1",
+                            "lead_id": "lead-1",
+                            "heyreach_campaign_id": 10,
+                            "reply_type": "positive",
+                            "qualified_at": "2026-09-01T10:00:00Z",
+                        }
+                    ]
+                )
+            ],
+            "heyreach_campaigns": [
+                SimpleNamespace(
+                    data=[{"heyreach_campaign_id": 10, "name": "Outbound"}]
+                )
+            ],
+            "heyreach_replies": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "conversation_id": "heyreach-conversation-1",
+                            "received_at": "2026-09-01T12:00:00Z",
+                        }
+                    ]
+                )
+            ],
+        }
+    )
+
+    items, total = await Repository(database).list_leads(
+        limit=25,
+        offset=0,
+        heyreach_campaign_id=10,
+    )
+
+    assert total == 1
+    assert items[0]["positive_conversation_count"] == 1
+    assert items[0]["latest_reply_at"] == "2026-09-01T12:00:00Z"
+    assert items[0]["source_campaigns"][0]["heyreach_campaign_id"] == 10
+    assert items[0]["source_campaigns"][0]["name"] == "Outbound"
+    lead_calls = [call for call in database.calls if call[0] == "leads"]
+    assert lead_calls[0][1:] == (
+        "select",
+        ("*,heyreach_conversations!inner(heyreach_campaign_id)",),
+        {"count": "exact"},
+    )
+    assert (
+        "leads",
+        "eq",
+        ("heyreach_conversations.heyreach_campaign_id", 10),
+        {},
+    ) in database.calls
 
 
 @pytest.mark.asyncio
@@ -372,6 +441,7 @@ async def test_phone_enrichment_attaches_only_inbound_replies() -> None:
             "smartlead_conversations": [
                 SimpleNamespace(data=[{"id": "conversation-1", "lead_id": "lead-1"}])
             ],
+            "heyreach_conversations": [SimpleNamespace(data=[])],
             "smartlead_replies": [
                 SimpleNamespace(
                     data=[
@@ -384,6 +454,7 @@ async def test_phone_enrichment_attaches_only_inbound_replies() -> None:
                     ]
                 )
             ],
+            "heyreach_replies": [SimpleNamespace(data=[])],
         }
     )
 

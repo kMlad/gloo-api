@@ -216,6 +216,20 @@ class Repository:
         )
         return response.data
 
+    async def get_heyreach_campaigns_by_ids(
+        self, campaign_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        if not campaign_ids:
+            return []
+        response = await (
+            self._db.table("heyreach_campaigns")
+            .select("*")
+            .in_("heyreach_campaign_id", campaign_ids)
+            .order("heyreach_campaign_id")
+            .execute()
+        )
+        return response.data
+
     async def upsert_campaign(
         self, campaign_id: int, name: str, enabled: bool, reply_types: list[str]
     ) -> dict[str, Any]:
@@ -365,13 +379,18 @@ class Repository:
         return response.data[0]
 
     async def get_import_run_lead_ids(self, run_id: str) -> list[str]:
-        response = await (
-            self._db.table("smartlead_import_run_items")
-            .select("lead_id")
-            .eq("run_id", run_id)
-            .execute()
-        )
-        return list(dict.fromkeys(str(item["lead_id"]) for item in response.data))
+        for table in ("smartlead_import_run_items", "heyreach_import_run_items"):
+            response = await (
+                self._db.table(table)
+                .select("lead_id")
+                .eq("run_id", run_id)
+                .execute()
+            )
+            if response.data:
+                return list(
+                    dict.fromkeys(str(item["lead_id"]) for item in response.data)
+                )
+        return []
 
     async def update_import_run(
         self, run_id: str, values: dict[str, Any]
@@ -611,6 +630,28 @@ class Repository:
         )
         return response.data[0]
 
+    async def upsert_heyreach_reply(self, values: dict[str, Any]) -> dict[str, Any]:
+        response = await (
+            self._db.table("heyreach_replies")
+            .upsert(
+                {**values, "updated_at": to_iso(utc_now())},
+                on_conflict="dedupe_key",
+            )
+            .execute()
+        )
+        return response.data[0]
+
+    async def update_heyreach_conversation(
+        self, conversation_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("heyreach_conversations")
+            .update({**values, "updated_at": to_iso(utc_now())})
+            .eq("id", conversation_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
     async def list_leads(
         self,
         *,
@@ -620,6 +661,7 @@ class Repository:
         reply_types: list[str] | None = None,
         status: str | None = None,
         campaign_id: int | None = None,
+        heyreach_campaign_id: int | None = None,
         import_run_id: str | None = None,
         assignment_status: str | None = None,
         assigned_sdr_id: str | None = None,
@@ -630,11 +672,17 @@ class Repository:
         selection = "*"
         if reply_types is not None or campaign_id is not None:
             selection += ",smartlead_conversations!inner(reply_type,smartlead_campaign_id)"
+        if heyreach_campaign_id is not None:
+            selection += ",heyreach_conversations!inner(heyreach_campaign_id)"
         query = self._db.table("leads").select(selection, count="exact")
         if reply_types is not None:
             query = query.in_("smartlead_conversations.reply_type", reply_types)
         if campaign_id is not None:
             query = query.eq("smartlead_conversations.smartlead_campaign_id", campaign_id)
+        if heyreach_campaign_id is not None:
+            query = query.eq(
+                "heyreach_conversations.heyreach_campaign_id", heyreach_campaign_id
+            )
         if import_run_id is not None:
             import_lead_ids = await self.get_import_run_lead_ids(import_run_id)
             if not import_lead_ids:
@@ -659,6 +707,7 @@ class Repository:
         leads = response.data
         for lead in leads:
             lead.pop("smartlead_conversations", None)
+            lead.pop("heyreach_conversations", None)
         if not leads:
             return [], response.count or 0
 
@@ -671,7 +720,16 @@ class Repository:
             .in_("lead_id", lead_ids)
             .execute()
         )
+        heyreach_conversations_response = await (
+            self._db.table("heyreach_conversations")
+            .select(
+                "id,lead_id,heyreach_campaign_id,reply_type,qualified_at"
+            )
+            .in_("lead_id", lead_ids)
+            .execute()
+        )
         conversations = conversations_response.data
+        heyreach_conversations = heyreach_conversations_response.data
         source_campaign_ids = sorted(
             {
                 int(item["smartlead_campaign_id"])
@@ -679,16 +737,33 @@ class Repository:
                 if item.get("smartlead_campaign_id") is not None
             }
         )
+        heyreach_campaign_ids = sorted(
+            {
+                int(item["heyreach_campaign_id"])
+                for item in heyreach_conversations
+                if item.get("heyreach_campaign_id") is not None
+            }
+        )
         source_campaigns = (
             await self.get_campaigns_by_ids(source_campaign_ids)
             if source_campaign_ids
+            else []
+        )
+        heyreach_source_campaigns = (
+            await self.get_heyreach_campaigns_by_ids(heyreach_campaign_ids)
+            if heyreach_campaign_ids
             else []
         )
         campaign_names = {
             int(item["smartlead_campaign_id"]): str(item["name"])
             for item in source_campaigns
         }
+        heyreach_campaign_names = {
+            int(item["heyreach_campaign_id"]): str(item["name"])
+            for item in heyreach_source_campaigns
+        }
         conversation_ids = [item["id"] for item in conversations]
+        heyreach_conversation_ids = [item["id"] for item in heyreach_conversations]
         replies: list[dict[str, Any]] = []
         if conversation_ids:
             replies_response = await (
@@ -698,9 +773,17 @@ class Repository:
                 .execute()
             )
             replies = replies_response.data
+        if heyreach_conversation_ids:
+            heyreach_replies_response = await (
+                self._db.table("heyreach_replies")
+                .select("conversation_id,received_at")
+                .in_("conversation_id", heyreach_conversation_ids)
+                .execute()
+            )
+            replies = [*replies, *heyreach_replies_response.data]
 
         conversations_by_lead: dict[str, list[str]] = {}
-        for conversation in conversations:
+        for conversation in [*conversations, *heyreach_conversations]:
             conversations_by_lead.setdefault(conversation["lead_id"], []).append(
                 conversation["id"]
             )
@@ -720,26 +803,48 @@ class Repository:
             lead_conversations = [
                 item for item in conversations if item["lead_id"] == lead["id"]
             ]
+            lead_heyreach_conversations = [
+                item
+                for item in heyreach_conversations
+                if item["lead_id"] == lead["id"]
+            ]
             lead["positive_conversation_count"] = sum(
-                item.get("reply_type") == "positive" for item in lead_conversations
+                item.get("reply_type") == "positive"
+                for item in [*lead_conversations, *lead_heyreach_conversations]
             )
             lead["ooo_conversation_count"] = sum(
                 item.get("reply_type") == "ooo" for item in lead_conversations
             )
             lead["latest_reply_at"] = max(timestamps) if timestamps else None
             lead["source_campaigns"] = [
-                {
-                    "smartlead_campaign_id": int(item["smartlead_campaign_id"]),
-                    "name": campaign_names.get(
-                        int(item["smartlead_campaign_id"]),
-                        f"SmartLead campaign {item['smartlead_campaign_id']}",
-                    ),
-                    "reply_type": item.get("reply_type"),
-                    "qualified_at": item["qualified_at"],
-                }
-                for item in lead_conversations
-                if item.get("smartlead_campaign_id") is not None
-                and item.get("qualified_at") is not None
+                *[
+                    {
+                        "smartlead_campaign_id": int(item["smartlead_campaign_id"]),
+                        "name": campaign_names.get(
+                            int(item["smartlead_campaign_id"]),
+                            f"SmartLead campaign {item['smartlead_campaign_id']}",
+                        ),
+                        "reply_type": item.get("reply_type"),
+                        "qualified_at": item["qualified_at"],
+                    }
+                    for item in lead_conversations
+                    if item.get("smartlead_campaign_id") is not None
+                    and item.get("qualified_at") is not None
+                ],
+                *[
+                    {
+                        "heyreach_campaign_id": int(item["heyreach_campaign_id"]),
+                        "name": heyreach_campaign_names.get(
+                            int(item["heyreach_campaign_id"]),
+                            f"HeyReach campaign {item['heyreach_campaign_id']}",
+                        ),
+                        "reply_type": item.get("reply_type"),
+                        "qualified_at": item["qualified_at"],
+                    }
+                    for item in lead_heyreach_conversations
+                    if item.get("heyreach_campaign_id") is not None
+                    and item.get("qualified_at") is not None
+                ],
             ]
         return leads, response.count or len(leads)
 
@@ -855,8 +960,21 @@ class Repository:
             .order("qualified_at", desc=True)
             .execute()
         )
-        conversations = conversations_response.data
-        conversation_ids = [item["id"] for item in conversations]
+        heyreach_conversations_response = await (
+            self._db.table("heyreach_conversations")
+            .select("*")
+            .eq("lead_id", lead_id)
+            .order("qualified_at", desc=True)
+            .execute()
+        )
+        conversations = [
+            *conversations_response.data,
+            *heyreach_conversations_response.data,
+        ]
+        conversation_ids = [item["id"] for item in conversations_response.data]
+        heyreach_conversation_ids = [
+            item["id"] for item in heyreach_conversations_response.data
+        ]
         replies: list[dict[str, Any]] = []
         if conversation_ids:
             replies_response = await (
@@ -866,7 +984,16 @@ class Repository:
                 .order("received_at")
                 .execute()
             )
-            replies = replies_response.data
+            replies.extend(replies_response.data)
+        if heyreach_conversation_ids:
+            heyreach_replies_response = await (
+                self._db.table("heyreach_replies")
+                .select("*")
+                .in_("conversation_id", heyreach_conversation_ids)
+                .order("received_at")
+                .execute()
+            )
+            replies.extend(heyreach_replies_response.data)
 
         replies_by_conversation: dict[str, list[dict[str, Any]]] = {}
         for reply in replies:
