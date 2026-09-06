@@ -12,6 +12,7 @@ PhoneSource = Literal[
     "fullenrich",
 ]
 ReplyType = Literal["positive", "ooo"]
+LeadPlatform = Literal["smartlead", "heyreach"]
 AppRole = Literal["admin", "sales_lead", "sdr"]
 AssignmentStatus = Literal["assigned", "unassigned"]
 LeadStatus = Literal[

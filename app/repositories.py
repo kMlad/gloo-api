@@ -660,6 +660,7 @@ class Repository:
         reply_type: str | None = None,
         reply_types: list[str] | None = None,
         status: str | None = None,
+        platform: str | None = None,
         campaign_id: int | None = None,
         heyreach_campaign_id: int | None = None,
         import_run_id: str | None = None,
@@ -669,14 +670,25 @@ class Repository:
     ) -> tuple[list[dict[str, Any]], int]:
         if reply_type is not None:
             reply_types = list(dict.fromkeys([*(reply_types or []), reply_type]))
+        join_smartlead = (
+            platform == "smartlead"
+            or campaign_id is not None
+            or (reply_types is not None and platform != "heyreach")
+        )
+        join_heyreach = platform == "heyreach" or heyreach_campaign_id is not None
         selection = "*"
-        if reply_types is not None or campaign_id is not None:
+        if join_smartlead:
             selection += ",smartlead_conversations!inner(reply_type,smartlead_campaign_id)"
-        if heyreach_campaign_id is not None:
-            selection += ",heyreach_conversations!inner(heyreach_campaign_id)"
+        if join_heyreach:
+            selection += ",heyreach_conversations!inner(heyreach_campaign_id,reply_type)"
         query = self._db.table("leads").select(selection, count="exact")
         if reply_types is not None:
-            query = query.in_("smartlead_conversations.reply_type", reply_types)
+            reply_type_column = (
+                "heyreach_conversations.reply_type"
+                if platform == "heyreach"
+                else "smartlead_conversations.reply_type"
+            )
+            query = query.in_(reply_type_column, reply_types)
         if campaign_id is not None:
             query = query.eq("smartlead_conversations.smartlead_campaign_id", campaign_id)
         if heyreach_campaign_id is not None:

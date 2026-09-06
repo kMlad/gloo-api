@@ -146,9 +146,11 @@ Date filters apply to SmartLead reply timestamps, not local lead creation dates,
 so a creation-date cutoff is not sufficient to repair an older reply batch.
 
 List imported leads with `GET /api/v1/leads` (user access token). Filters include
-`campaign_id` (SmartLead), `heyreach_campaign_id`, `import_run_id`, `status`,
-singular `reply_type`, and repeated `reply_types`. `campaign_id` and
-`heyreach_campaign_id` cannot be combined. Every list item includes
+`platform` (`smartlead` or `heyreach`), `campaign_id` (SmartLead),
+`heyreach_campaign_id`, `import_run_id`, `status`, singular `reply_type`, and
+repeated `reply_types`. `campaign_id` and `heyreach_campaign_id` cannot be
+combined, and `platform` cannot be paired with the other platform's campaign
+filter. Every list item includes
 `source_campaigns` so the UI can show where and why the lead qualified.
 Retrieve complete canonical, campaign-specific, custom-property, and full
 chat history (inbound and outbound) with `GET /api/v1/leads/{lead_id}`. Cached

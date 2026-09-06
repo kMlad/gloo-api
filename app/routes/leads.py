@@ -44,6 +44,7 @@ from app.models import (
     LeadCsvPreviewResponse,
     LeadDetailResponse,
     LeadListResponse,
+    LeadPlatform,
     LeadStatus,
     LeadUpdate,
     ReplyType,
@@ -103,6 +104,7 @@ async def list_leads(
     reply_type: ReplyType | None = Query(default=None),
     reply_types: list[ReplyType] | None = Query(default=None),
     status: LeadStatus | None = Query(default=None),
+    platform: LeadPlatform | None = Query(default=None),
     campaign_id: int | None = Query(default=None, gt=0),
     heyreach_campaign_id: int | None = Query(default=None, gt=0),
     import_run_id: UUID | None = Query(default=None),
@@ -119,6 +121,16 @@ async def list_leads(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="campaign_id and heyreach_campaign_id are mutually exclusive",
         )
+    if platform == "smartlead" and heyreach_campaign_id is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="platform=smartlead cannot be combined with heyreach_campaign_id",
+        )
+    if platform == "heyreach" and campaign_id is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="platform=heyreach cannot be combined with campaign_id",
+        )
     selected_reply_types = list(reply_types or [])
     if reply_type is not None and reply_type not in selected_reply_types:
         selected_reply_types.append(reply_type)
@@ -127,6 +139,7 @@ async def list_leads(
         offset=offset,
         reply_types=selected_reply_types or None,
         status=status,
+        platform=platform,
         campaign_id=campaign_id,
         heyreach_campaign_id=heyreach_campaign_id,
         import_run_id=str(import_run_id) if import_run_id is not None else None,

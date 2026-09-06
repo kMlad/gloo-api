@@ -263,7 +263,7 @@ async def test_heyreach_campaign_filter_joins_conversations() -> None:
     lead_calls = [call for call in database.calls if call[0] == "leads"]
     assert lead_calls[0][1:] == (
         "select",
-        ("*,heyreach_conversations!inner(heyreach_campaign_id)",),
+        ("*,heyreach_conversations!inner(heyreach_campaign_id,reply_type)",),
         {"count": "exact"},
     )
     assert (
@@ -272,6 +272,59 @@ async def test_heyreach_campaign_filter_joins_conversations() -> None:
         ("heyreach_conversations.heyreach_campaign_id", 10),
         {},
     ) in database.calls
+
+
+@pytest.mark.asyncio
+async def test_smartlead_platform_filter_joins_conversations() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[], count=0)]})
+
+    items, total = await Repository(database).list_leads(
+        limit=50,
+        offset=0,
+        platform="smartlead",
+    )
+
+    assert items == []
+    assert total == 0
+    lead_calls = [call for call in database.calls if call[0] == "leads"]
+    assert lead_calls[0][1:] == (
+        "select",
+        (
+            "*,smartlead_conversations!inner(reply_type,smartlead_campaign_id)",
+        ),
+        {"count": "exact"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_heyreach_platform_filter_joins_conversations_and_reply_types() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[], count=0)]})
+
+    items, total = await Repository(database).list_leads(
+        limit=50,
+        offset=0,
+        platform="heyreach",
+        reply_types=["positive"],
+    )
+
+    assert items == []
+    assert total == 0
+    lead_calls = [call for call in database.calls if call[0] == "leads"]
+    assert lead_calls[0][1:] == (
+        "select",
+        ("*,heyreach_conversations!inner(heyreach_campaign_id,reply_type)",),
+        {"count": "exact"},
+    )
+    assert (
+        "leads",
+        "in",
+        ("heyreach_conversations.reply_type", ["positive"]),
+        {},
+    ) in database.calls
+    assert not any(
+        call[1] == "in" and call[2][0] == "smartlead_conversations.reply_type"
+        for call in lead_calls
+    )
 
 
 @pytest.mark.asyncio

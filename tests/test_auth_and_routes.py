@@ -43,6 +43,7 @@ class LeadRepositoryStub:
         offset: int,
         reply_types=None,
         status=None,
+        platform=None,
         campaign_id=None,
         heyreach_campaign_id=None,
         import_run_id=None,
@@ -55,6 +56,7 @@ class LeadRepositoryStub:
         self.statuses.append(status)
         self.list_scopes.append(
             {
+                "platform": platform,
                 "campaign_id": campaign_id,
                 "heyreach_campaign_id": heyreach_campaign_id,
                 "import_run_id": import_run_id,
@@ -661,6 +663,7 @@ async def test_sales_lead_filters_and_assigns_exact_unassigned_leads() -> None:
 
     assert candidates.status_code == 200
     assert repository.list_scopes[0] == {
+        "platform": None,
         "campaign_id": 10,
         "heyreach_campaign_id": None,
         "import_run_id": None,
@@ -1241,3 +1244,43 @@ async def test_lead_list_rejects_combined_smartlead_and_heyreach_campaign_filter
     assert combined.status_code == 422
     assert repository.list_scopes[0]["heyreach_campaign_id"] == 10
     assert repository.list_scopes[0]["campaign_id"] is None
+    assert repository.list_scopes[0]["platform"] is None
+
+
+@pytest.mark.asyncio
+async def test_lead_list_filters_by_platform() -> None:
+    repository = LeadRepositoryStub()
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=_user(role="sales_lead"))
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        smartlead = await client.get(
+            "/api/v1/leads?platform=smartlead", headers=headers
+        )
+        heyreach = await client.get("/api/v1/leads?platform=heyreach", headers=headers)
+        invalid = await client.get("/api/v1/leads?platform=linkedin", headers=headers)
+        mismatched_smartlead = await client.get(
+            "/api/v1/leads?platform=smartlead&heyreach_campaign_id=10",
+            headers=headers,
+        )
+        mismatched_heyreach = await client.get(
+            "/api/v1/leads?platform=heyreach&campaign_id=10",
+            headers=headers,
+        )
+
+    assert smartlead.status_code == 200
+    assert heyreach.status_code == 200
+    assert invalid.status_code == 422
+    assert mismatched_smartlead.status_code == 422
+    assert mismatched_heyreach.status_code == 422
+    assert repository.list_scopes[0]["platform"] == "smartlead"
+    assert repository.list_scopes[1]["platform"] == "heyreach"
