@@ -9,6 +9,8 @@ numbers. Import and phone enrichment are separate, asynchronous runs.
 Copy `.env.example` to `.env.local` and provide:
 
 - `SUPABASE_URL` and a backend-only `SUPABASE_SECRET_KEY`
+- `RESEND_API_KEY` and a verified `RESEND_FROM_EMAIL` for Supabase Auth email
+  delivery
 - `SMARTLEAD_API_KEY`
 - `LEADMAGIC_API_KEY`, `PROSPEO_API_KEY`, `AIRSCALE_API_KEY`, and
   `FULLENRICH_API_KEY`
@@ -18,6 +20,17 @@ Copy `.env.example` to `.env.local` and provide:
 - optionally `INVITE_REDIRECT_URL` (must be in the Auth redirect allow-list)
 
 Never expose the Supabase secret key or internal token in a browser client.
+
+Supabase Auth uses Resend as its SMTP delivery provider. `RESEND_FROM_EMAIL`
+must belong to a domain verified in Resend. The Supabase CLI interpolates these
+values from the shell when it reads `supabase/config.toml`; load `.env.local`
+before running a Supabase configuration command:
+
+```shell
+set -a
+source .env.local
+set +a
+```
 
 Local Auth is invite-only (`[auth] enable_signup = false` in
 `supabase/config.toml`). Keep `[auth.email] enable_signup = true` so invited
