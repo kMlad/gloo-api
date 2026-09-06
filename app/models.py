@@ -140,7 +140,7 @@ class LeadSource(BaseModel):
 
 class LeadListItem(BaseModel):
     id: UUID
-    email: str
+    email: str | None = None
     first_name: str | None
     last_name: str | None
     smartlead_phone_number: str | None
@@ -236,3 +236,17 @@ class InviteUserResponse(BaseModel):
     email: str
     role: AppRole
     invited_at: datetime
+
+
+class LeadCsvPreviewResponse(BaseModel):
+    headers: list[str]
+    preview_rows: list[list[str]]
+    row_count: int
+    suggested_mapping: dict[str, str | None]
+
+
+class LeadCsvImportResponse(BaseModel):
+    created_count: int
+    skipped_duplicate_count: int
+    skipped_invalid_count: int
+    created_lead_ids: list[UUID]

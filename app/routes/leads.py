@@ -1,7 +1,17 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from pydantic import ValidationError
 
 from app.auth import (
     AuthenticatedUser,
@@ -11,12 +21,20 @@ from app.auth import (
 )
 from app.dependencies import get_repository, get_smartlead_client
 from app.env import Env, get_env
+from app.lead_csv import (
+    LeadCsvMapping,
+    LeadCsvMappingError,
+    import_leads_csv,
+    preview_leads_csv,
+)
 from app.models import (
     AssignmentStatus,
     LeadAssignmentRecord,
     LeadAssignmentRequest,
     LeadAssignmentResponse,
     LeadAssignmentTarget,
+    LeadCsvImportResponse,
+    LeadCsvPreviewResponse,
     LeadDetailResponse,
     LeadListResponse,
     LeadStatus,
@@ -27,6 +45,7 @@ from app.repositories import Repository
 from app.services import LeadService
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
+from app.tables.csv_import import CsvImportError
 from supabase import AsyncClient, AuthApiError
 
 router = APIRouter(
@@ -126,6 +145,48 @@ async def assign_leads(
         "assigned_count": len(assigned_ids),
         "skipped_count": len(skipped_ids),
     }
+
+
+def _csv_http_error(error: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=str(error),
+    )
+
+
+@router.post("/imports/preview", response_model=LeadCsvPreviewResponse)
+async def preview_lead_csv(file: UploadFile = File(...)) -> dict:
+    content = await file.read()
+    try:
+        return preview_leads_csv(content)
+    except CsvImportError as error:
+        raise _csv_http_error(error) from error
+
+
+@router.post("/imports", response_model=LeadCsvImportResponse)
+async def import_lead_csv(
+    repository: RepositoryDependency,
+    actor: LeadUserDependency,
+    file: UploadFile = File(...),
+    mapping: str = Form(...),
+) -> dict:
+    try:
+        parsed_mapping = LeadCsvMapping.model_validate_json(mapping)
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=error.errors(),
+        ) from error
+    content = await file.read()
+    try:
+        return await import_leads_csv(
+            content=content,
+            mapping=parsed_mapping,
+            actor=actor,
+            repository=repository,
+        )
+    except (CsvImportError, LeadCsvMappingError) as error:
+        raise _csv_http_error(error) from error
 
 
 @router.get("/{lead_id}", response_model=LeadDetailResponse)

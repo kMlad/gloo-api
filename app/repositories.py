@@ -6,6 +6,8 @@ from postgrest.exceptions import APIError
 from app.utils import chunks, merge_non_empty, parse_datetime, to_iso, utc_now
 from supabase import AsyncClient
 
+_LEAD_INSERT_CHUNK = 100
+
 
 class ConcurrentImportError(Exception):
     pass
@@ -392,6 +394,49 @@ class Repository:
             .execute()
         )
         return response.data[0]
+
+    async def existing_lead_emails(self, emails: list[str]) -> set[str]:
+        found: set[str] = set()
+        unique = list(dict.fromkeys(email for email in emails if email))
+        for group in chunks(unique, _LEAD_INSERT_CHUNK):
+            response = await (
+                self._db.table("leads")
+                .select("email_normalized")
+                .in_("email_normalized", group)
+                .execute()
+            )
+            found.update(
+                str(item["email_normalized"])
+                for item in response.data
+                if item.get("email_normalized")
+            )
+        return found
+
+    async def existing_lead_phones(self, phones: list[str]) -> set[str]:
+        found: set[str] = set()
+        unique = list(dict.fromkeys(phone for phone in phones if phone))
+        for group in chunks(unique, _LEAD_INSERT_CHUNK):
+            response = await (
+                self._db.table("leads")
+                .select("phone_normalized")
+                .in_("phone_normalized", group)
+                .execute()
+            )
+            found.update(
+                str(item["phone_normalized"])
+                for item in response.data
+                if item.get("phone_normalized")
+            )
+        return found
+
+    async def insert_leads(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        inserted: list[dict[str, Any]] = []
+        for group in chunks(rows, _LEAD_INSERT_CHUNK):
+            response = await self._db.table("leads").insert(group).execute()
+            inserted.extend(response.data)
+        return inserted
 
     async def upsert_conversation(self, values: dict[str, Any]) -> dict[str, Any]:
         response = await (

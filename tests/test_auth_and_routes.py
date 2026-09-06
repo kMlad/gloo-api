@@ -29,6 +29,9 @@ class LeadRepositoryStub:
         self.assignment_calls: list[tuple[list[str], str, str]] = []
         self.assignment_updates: list[tuple[str, str | None, str]] = []
         self.assignable_ids: set[str] | None = None
+        self.existing_emails: set[str] = set()
+        self.existing_phones: set[str] = set()
+        self.inserted_leads: list[dict] = []
 
     async def list_leads(
         self,
@@ -151,6 +154,20 @@ class LeadRepositoryStub:
             "assigned_by": assigned_by if sdr_id is not None else None,
             "assigned_at": now,
         }
+
+    async def existing_lead_emails(self, emails: list[str]) -> set[str]:
+        return {email for email in emails if email in self.existing_emails}
+
+    async def existing_lead_phones(self, phones: list[str]) -> set[str]:
+        return {phone for phone in phones if phone in self.existing_phones}
+
+    async def insert_leads(self, rows: list[dict]) -> list[dict]:
+        stored = []
+        for row in rows:
+            item = {**row, "id": str(uuid4())}
+            stored.append(item)
+        self.inserted_leads.extend(stored)
+        return stored
 
 
 class PhoneEnrichmentServiceStub:
@@ -585,6 +602,78 @@ async def test_sdr_lead_access_is_owner_scoped_and_assignment_is_forbidden() -> 
     assert repository.list_scopes[0]["visible_to_sdr_id"] == sdr_id
     assert repository.detail_scopes == [sdr_id, sdr_id]
     assert repository.update_scopes == [sdr_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "sales_lead", "sdr"])
+async def test_all_lead_roles_can_preview_and_import_csv(role: str) -> None:
+    user_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    repository = LeadRepositoryStub()
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=_user(role=role, user_id=user_id))
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+    csv_bytes = b"Email,Phone\npat@example.com,+14155552671\n"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        preview = await client.post(
+            "/api/v1/leads/imports/preview",
+            headers=headers,
+            files={"file": ("leads.csv", csv_bytes, "text/csv")},
+        )
+        imported = await client.post(
+            "/api/v1/leads/imports",
+            headers=headers,
+            files={"file": ("leads.csv", csv_bytes, "text/csv")},
+            data={"mapping": '{"email":"Email","phone":"Phone"}'},
+        )
+
+    assert preview.status_code == 200
+    assert preview.json()["headers"] == ["Email", "Phone"]
+    assert preview.json()["suggested_mapping"]["email"] == "Email"
+    assert imported.status_code == 200
+    assert imported.json()["created_count"] == 1
+    inserted = repository.inserted_leads[0]
+    if role == "sdr":
+        assert inserted["assigned_sdr_id"] == user_id
+        assert inserted["assigned_by"] == user_id
+        assert inserted["assigned_at"]
+    else:
+        assert "assigned_sdr_id" not in inserted
+
+
+@pytest.mark.asyncio
+async def test_lead_csv_import_requires_authentication() -> None:
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = LeadRepositoryStub
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=None)
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        preview = await client.post(
+            "/api/v1/leads/imports/preview",
+            files={"file": ("leads.csv", b"Email\npat@example.com\n", "text/csv")},
+        )
+        imported = await client.post(
+            "/api/v1/leads/imports",
+            files={"file": ("leads.csv", b"Email\npat@example.com\n", "text/csv")},
+            data={"mapping": '{"email":"Email"}'},
+        )
+
+    assert preview.status_code == 401
+    assert imported.status_code == 401
 
 
 @pytest.mark.asyncio

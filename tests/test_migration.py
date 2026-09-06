@@ -147,6 +147,23 @@ def test_lead_assignment_migration_tracks_owner_and_audit_metadata() -> None:
     assert "grant " not in migration
 
 
+def test_nullable_lead_email_migration_allows_phone_only_leads() -> None:
+    migration = next(
+        Path("supabase/migrations").glob(
+            "*_nullable_lead_email_and_phone_normalized.sql"
+        )
+    ).read_text()
+
+    assert "alter column email drop not null" in migration
+    assert "alter column email_normalized drop not null" in migration
+    assert "leads_email_normalized_format_check" in migration
+    assert "add column phone_normalized text generated always as" in migration
+    assert "leads_email_or_phone_check" in migration
+    assert "email_normalized is not null or phone_normalized is not null" in migration
+    assert "leads_phone_normalized_idx" in migration
+    assert "grant " not in migration
+
+
 def test_workbook_tables_migration_is_private_and_typed() -> None:
     migration = next(
         Path("supabase/migrations").glob("*_workbook_tables.sql")

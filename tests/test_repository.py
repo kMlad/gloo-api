@@ -47,6 +47,9 @@ class QueryStub:
     def upsert(self, *args, **kwargs):
         return self._record("upsert", *args, **kwargs)
 
+    def insert(self, *args, **kwargs):
+        return self._record("insert", *args, **kwargs)
+
     async def execute(self):
         self.calls.append((self.table, "execute", (), {}))
         return self.response
@@ -441,3 +444,59 @@ async def test_lead_and_conversation_are_sent_to_atomic_rpc() -> None:
         "smartlead_campaign_id": 10,
         "smartlead_campaign_lead_map_id": "map-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_existing_lead_lookups_query_normalized_identity() -> None:
+    database = DatabaseStub(
+        {
+            "leads": [
+                SimpleNamespace(data=[{"email_normalized": "pat@example.com"}]),
+                SimpleNamespace(data=[{"phone_normalized": "14155552671"}]),
+            ]
+        }
+    )
+    repository = Repository(database)
+
+    emails = await repository.existing_lead_emails(
+        ["pat@example.com", "pat@example.com", ""]
+    )
+    phones = await repository.existing_lead_phones(["14155552671", ""])
+
+    assert emails == {"pat@example.com"}
+    assert phones == {"14155552671"}
+    assert (
+        "leads",
+        "in",
+        ("email_normalized", ["pat@example.com"]),
+        {},
+    ) in database.calls
+    assert (
+        "leads",
+        "in",
+        ("phone_normalized", ["14155552671"]),
+        {},
+    ) in database.calls
+
+
+@pytest.mark.asyncio
+async def test_insert_leads_returns_empty_list_without_querying() -> None:
+    database = DatabaseStub({"leads": []})
+
+    inserted = await Repository(database).insert_leads([])
+
+    assert inserted == []
+    assert database.calls == []
+
+
+@pytest.mark.asyncio
+async def test_insert_leads_inserts_payload_batch() -> None:
+    stored = [{"id": "lead-1", "email": "pat@example.com"}]
+    database = DatabaseStub({"leads": [SimpleNamespace(data=stored)]})
+
+    inserted = await Repository(database).insert_leads(
+        [{"email": "pat@example.com", "email_normalized": "pat@example.com"}]
+    )
+
+    assert inserted == stored
+    assert database.calls[0][0:2] == ("leads", "insert")
