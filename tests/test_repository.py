@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.heyreach.repository import HeyReachRepository
 from app.phone_enrichment.repository import EnrichmentRepository
 from app.repositories import Repository
 from app.tables.repository import _ROW_LIST_CHUNK, TableRepository
@@ -66,6 +67,32 @@ class DatabaseStub:
     def rpc(self, function, params):
         self.calls.append((function, "rpc", (params,), {}))
         return QueryStub(function, self.responses[function].pop(0), self.calls)
+
+
+@pytest.mark.asyncio
+async def test_list_campaigns_orders_newest_first() -> None:
+    database = DatabaseStub(
+        {"smartlead_campaigns": [SimpleNamespace(data=[{"smartlead_campaign_id": 11}])]}
+    )
+
+    await Repository(database).list_campaigns()
+
+    assert ("smartlead_campaigns", "order", ("smartlead_campaign_id",), {"desc": True}) in (
+        database.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_heyreach_campaigns_orders_newest_first() -> None:
+    database = DatabaseStub(
+        {"heyreach_campaigns": [SimpleNamespace(data=[{"heyreach_campaign_id": 11}])]}
+    )
+
+    await HeyReachRepository(database).list_campaigns()
+
+    assert ("heyreach_campaigns", "order", ("heyreach_campaign_id",), {"desc": True}) in (
+        database.calls
+    )
 
 
 @pytest.mark.asyncio

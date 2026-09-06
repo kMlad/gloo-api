@@ -23,7 +23,7 @@ class Repository:
         query = self._db.table("smartlead_campaigns").select("*")
         if enabled_only:
             query = query.eq("enabled", True)
-        response = await query.order("smartlead_campaign_id").execute()
+        response = await query.order("smartlead_campaign_id", desc=True).execute()
         return response.data
 
     async def sync_campaign_catalog(

@@ -24,6 +24,38 @@ from app.utils import (
 logger = logging.getLogger(__name__)
 
 _REPLIED_STATUSES = {"messagereply", "inmailreply", "replied"}
+_AUTO_TAG_FIELDS = (
+    "autoTag",
+    "auto_tag",
+    "leadAutoTag",
+    "lead_auto_tag",
+    "autoTagName",
+    "auto_tag_name",
+    "autoTagType",
+    "auto_tag_type",
+    "autoTagStatus",
+    "leadAutoTagName",
+)
+_AUTO_TAG_NESTED_KEYS = (
+    "name",
+    "tag",
+    "tagName",
+    "displayName",
+    "type",
+    "status",
+    "sentiment",
+    "sentimentType",
+    "label",
+    "value",
+)
+_POSITIVE_AUTO_TAGS = frozenset({"interested", "positive", "interested lead"})
+_NEGATIVE_AUTO_TAGS = frozenset(
+    {"not interested", "not interested lead", "negative"}
+)
+_GENERIC_AUTO_TAGS = frozenset(
+    {"generic", "neutral", "ooo", "out of office", "outofoffice"}
+)
+_AUTO_TAG_TYPES = frozenset({"auto", "autotag", "auto_tag", "lead autotag"})
 
 
 class HeyReachCampaignService:
@@ -104,6 +136,7 @@ class HeyReachImportService:
         try:
             return await self._repository.create_import_run(
                 campaign_ids=campaign_ids,
+                reply_types=list(request.reply_types),
                 reply_time_from=reply_time_from,
                 reply_time_to=reply_time_to,
                 max_conversations=self._max_conversations,
@@ -137,6 +170,7 @@ class HeyReachImportService:
         run = claimed
         request = HeyReachImportRequest(
             campaign_ids=[int(value) for value in run["campaign_ids"]],
+            reply_types=list(run.get("reply_types") or ["positive"]),
             reply_time_from=(
                 parse_datetime(run["reply_time_from"])
                 if run.get("reply_time_from")
@@ -180,8 +214,21 @@ class HeyReachImportService:
                 items, fetch_errors = await self._fetch_replied_leads(
                     campaign_id, request
                 )
-                qualifying.extend(items)
                 errors.extend(fetch_errors)
+                for item in items:
+                    try:
+                        classified = await self._classify_replied_lead(item, request)
+                    except Exception as exc:  # noqa: BLE001 - isolate one conversation
+                        errors.append(
+                            {
+                                "scope": "conversation",
+                                "campaign_id": campaign_id,
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+                    if classified is not None:
+                        qualifying.append(classified)
 
             count = len(qualifying)
             await self._repository.update_import_run(
@@ -215,7 +262,7 @@ class HeyReachImportService:
                     errors.append(
                         {
                             "scope": "conversation",
-                            "campaign_id": self._campaign_id(item),
+                            "campaign_id": item.get("campaign_id"),
                             "message": str(exc),
                         }
                     )
@@ -299,6 +346,7 @@ class HeyReachImportService:
         )
         return (
             [int(value) for value in run.get("campaign_ids", [])] == campaign_ids
+            and list(run.get("reply_types") or ["positive"]) == list(request.reply_types)
             and stored_from == request.reply_time_from
             and stored_to == request.reply_time_to
         )
@@ -340,7 +388,9 @@ class HeyReachImportService:
                 break
         return items, errors
 
-    async def _persist_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+    async def _classify_replied_lead(
+        self, item: dict[str, Any], request: HeyReachImportRequest
+    ) -> dict[str, Any] | None:
         campaign_id = self._campaign_id(item)
         if campaign_id is None:
             raise ValueError("Campaign lead is missing its campaign ID")
@@ -355,6 +405,39 @@ class HeyReachImportService:
         if linkedin is None:
             raise ValueError("Campaign lead has no LinkedIn profile URL")
 
+        conversation = await self._conversation_for_lead(campaign_id, linkedin)
+        auto_tag = self.auto_tag_label(conversation, item, profile)
+        if auto_tag is None:
+            conversation = await self._hydrate_conversation_messages(conversation)
+            auto_tag = self.auto_tag_label(conversation, item, profile)
+        reply_type = self.reply_type_for_auto_tag(auto_tag)
+        if reply_type is None or reply_type not in request.reply_types:
+            await self._recategorize_existing(
+                campaign_id=campaign_id,
+                conversation=conversation,
+                linkedin=linkedin,
+                reply_type=reply_type,
+                auto_tag=auto_tag,
+            )
+            return None
+        return {
+            "item": item,
+            "profile": profile,
+            "linkedin": linkedin,
+            "conversation": conversation,
+            "auto_tag": auto_tag,
+            "reply_type": reply_type,
+            "campaign_id": campaign_id,
+        }
+
+    async def _persist_item(self, classified: dict[str, Any]) -> dict[str, Any] | None:
+        item = classified["item"]
+        profile = classified["profile"]
+        linkedin = classified["linkedin"]
+        campaign_id = classified["campaign_id"]
+        conversation_meta = await self._hydrate_conversation_messages(
+            classified["conversation"]
+        )
         email = str(
             first_present(
                 profile,
@@ -369,9 +452,12 @@ class HeyReachImportService:
 
         custom_fields = profile.get("customUserFields") or profile.get("custom_fields")
         custom_properties = self._custom_properties(custom_fields)
-        conversation_meta = await self._conversation_for_lead(campaign_id, linkedin)
         messages = conversation_meta.get("messages") or []
-        inbound = [message for message in messages if self._message_direction(message) == "inbound"]
+        inbound = [
+            message
+            for message in messages
+            if self._message_direction(message) == "inbound"
+        ]
         received_times = [
             self._message_received_at(message) for message in inbound or messages
         ]
@@ -402,9 +488,8 @@ class HeyReachImportService:
             "linkedin_profile": linkedin,
             "linkedin_profile_normalized": linkedin,
         }
-        conversation_id = str(
-            conversation_meta.get("id")
-            or f"fallback:{campaign_id}:{linkedin}"
+        conversation_id = self._external_conversation_id(
+            conversation_meta, campaign_id, linkedin
         )
         lead_external_id = item.get("id") or profile.get("id")
         account_id = self._linkedin_account_id(item, conversation_meta)
@@ -426,11 +511,13 @@ class HeyReachImportService:
                 ),
                 "linkedin_account_id": account_id,
                 "linkedin_sender_name": sender_name,
-                "reply_type": "positive",
+                "auto_tag": classified["auto_tag"],
+                "reply_type": classified["reply_type"],
                 "qualified_at": to_iso(qualified_at),
                 "lead_properties": {
                     **profile,
                     "_campaign_record": item,
+                    "auto_tag": classified["auto_tag"],
                 },
                 "custom_properties": custom_properties,
             },
@@ -472,6 +559,30 @@ class HeyReachImportService:
             "reply_count": reply_count,
         }
 
+    async def _recategorize_existing(
+        self,
+        *,
+        campaign_id: int,
+        conversation: dict[str, Any],
+        linkedin: str,
+        reply_type: str | None,
+        auto_tag: str | None,
+    ) -> None:
+        if reply_type is None:
+            return
+        existing = await self._repository.get_conversation(
+            campaign_id=campaign_id,
+            heyreach_conversation_id=self._external_conversation_id(
+                conversation, campaign_id, linkedin
+            ),
+        )
+        if existing is None:
+            return
+        values: dict[str, Any] = {"reply_type": reply_type}
+        if auto_tag:
+            values["auto_tag"] = auto_tag
+        await self._repository.update_conversation(str(existing["id"]), values)
+
     async def _conversation_for_lead(
         self, campaign_id: int, linkedin: str
     ) -> dict[str, Any]:
@@ -490,30 +601,151 @@ class HeyReachImportService:
         )
         if not conversation:
             return {}
+        messages = conversation.get("messages")
+        if isinstance(messages, list):
+            conversation["messages"] = [
+                item for item in messages if isinstance(item, dict)
+            ]
+        else:
+            conversation["messages"] = []
+        return conversation
+
+    async def _hydrate_conversation_messages(
+        self, conversation: dict[str, Any]
+    ) -> dict[str, Any]:
+        if conversation.get("_hydrated"):
+            return conversation
         account_id = conversation.get("linkedInAccountId") or conversation.get(
             "linkedinAccountId"
         )
         conversation_id = conversation.get("id") or conversation.get("conversationId")
-        messages = conversation.get("messages")
-        if (
-            isinstance(account_id, int | str)
-            and conversation_id not in (None, "")
-            and not isinstance(messages, list)
+        if not (
+            isinstance(account_id, int | str) and conversation_id not in (None, "")
         ):
-            try:
-                chatroom = await self._heyreach.get_chatroom(
-                    account_id=int(account_id),
-                    conversation_id=str(conversation_id),
-                )
-                messages = chatroom.get("messages")
-                conversation = {**conversation, **chatroom}
-            except HeyReachError:
-                messages = []
+            conversation["_hydrated"] = True
+            return conversation
+        try:
+            chatroom = await self._heyreach.get_chatroom(
+                account_id=int(account_id),
+                conversation_id=str(conversation_id),
+            )
+        except HeyReachError:
+            conversation["_hydrated"] = True
+            return conversation
+        messages = chatroom.get("messages")
+        conversation = {**conversation, **chatroom, "_hydrated": True}
         if isinstance(messages, list):
-            conversation["messages"] = [item for item in messages if isinstance(item, dict)]
-        else:
+            conversation["messages"] = [
+                item for item in messages if isinstance(item, dict)
+            ]
+        elif not isinstance(conversation.get("messages"), list):
             conversation["messages"] = []
         return conversation
+
+    @classmethod
+    def auto_tag_label(cls, *sources: Any) -> str | None:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            label = cls._auto_tag_from_source(source)
+            if label:
+                return label
+            for nested_key in (
+                "linkedInUserProfile",
+                "linkedinUserProfile",
+                "correspondentProfile",
+                "profile",
+                "lead",
+            ):
+                nested = source.get(nested_key)
+                if isinstance(nested, dict):
+                    label = cls._auto_tag_from_source(nested)
+                    if label:
+                        return label
+        return None
+
+    @classmethod
+    def _auto_tag_from_source(cls, source: dict[str, Any]) -> str | None:
+        label = cls._auto_tag_from_mapping(source)
+        if label:
+            return label
+        for tags_key in ("autoTags", "auto_tags", "tags"):
+            label = cls._auto_tag_from_tags(source.get(tags_key))
+            if label:
+                return label
+        return None
+
+    @classmethod
+    def reply_type_for_auto_tag(cls, label: str | None) -> str | None:
+        if not label:
+            return None
+        key = cls._normalize_auto_tag(label)
+        if (
+            key in _NEGATIVE_AUTO_TAGS
+            or "not interested" in key
+            or key.endswith("negative")
+        ):
+            return "negative"
+        if key in _POSITIVE_AUTO_TAGS or key.endswith("positive"):
+            return "positive"
+        if key in _GENERIC_AUTO_TAGS:
+            return "ooo"
+        return None
+
+    @classmethod
+    def _auto_tag_from_mapping(cls, source: dict[str, Any]) -> str | None:
+        for key in _AUTO_TAG_FIELDS:
+            label = cls._auto_tag_value(source.get(key))
+            if label:
+                return label
+        return None
+
+    @classmethod
+    def _auto_tag_from_tags(cls, tags: Any) -> str | None:
+        if isinstance(tags, dict):
+            return cls._auto_tag_value(tags)
+        if not isinstance(tags, list):
+            return None
+        mapped: list[str] = []
+        for tag in tags:
+            if isinstance(tag, dict):
+                is_auto = bool(tag.get("isAutoTag")) or (
+                    str(tag.get("type") or "").casefold() in _AUTO_TAG_TYPES
+                )
+                label = cls._auto_tag_value(tag)
+                if label and (is_auto or cls.reply_type_for_auto_tag(label)):
+                    mapped.append(label)
+            elif isinstance(tag, str) and cls.reply_type_for_auto_tag(tag):
+                mapped.append(tag)
+        for label in mapped:
+            if cls.reply_type_for_auto_tag(label) == "negative":
+                return label
+        return mapped[0] if mapped else None
+
+    @classmethod
+    def _auto_tag_value(cls, value: Any) -> str | None:
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, dict):
+            nested = first_present(value, _AUTO_TAG_NESTED_KEYS)
+            if nested is None:
+                return None
+            return cls._auto_tag_value(nested)
+        return None
+
+    @staticmethod
+    def _normalize_auto_tag(label: str) -> str:
+        return " ".join(label.casefold().replace("_", " ").replace("-", " ").split())
+
+    @classmethod
+    def _external_conversation_id(
+        cls, conversation: dict[str, Any], campaign_id: int, linkedin: str
+    ) -> str:
+        conversation_id = conversation.get("id") or conversation.get("conversationId")
+        if conversation_id not in (None, ""):
+            return str(conversation_id)
+        return f"fallback:{campaign_id}:{linkedin}"
 
     async def _finish_run(
         self,

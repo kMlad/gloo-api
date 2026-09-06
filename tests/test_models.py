@@ -124,11 +124,19 @@ def test_invite_user_request_requires_email_and_known_role() -> None:
 
 def test_heyreach_import_request_validates_campaigns_and_time_range() -> None:
     assert HeyReachImportRequest().campaign_ids is None
+    assert HeyReachImportRequest().reply_types == ["positive"]
     assert HeyReachImportRequest(campaign_ids=[10]).campaign_ids == [10]
+    assert HeyReachImportRequest(
+        campaign_ids=[10], reply_types=["positive", "ooo"]
+    ).reply_types == ["positive", "ooo"]
     with pytest.raises(ValidationError):
         HeyReachImportRequest(campaign_ids=[])
     with pytest.raises(ValidationError):
         HeyReachImportRequest(campaign_ids=[10, 10])
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(reply_types=[])
+    with pytest.raises(ValidationError):
+        HeyReachImportRequest(reply_types=["negative"])
     with pytest.raises(ValidationError):
         HeyReachImportRequest(
             reply_time_from=datetime(2026, 9, 1, tzinfo=UTC).replace(tzinfo=None)
@@ -151,11 +159,12 @@ def test_lead_source_requires_a_campaign_id() -> None:
     heyreach = LeadSource(
         heyreach_campaign_id=20,
         name="HeyReach",
-        reply_type="positive",
+        reply_type="negative",
         qualified_at=qualified_at,
     )
     assert smartlead.smartlead_campaign_id == 10
     assert heyreach.heyreach_campaign_id == 20
+    assert heyreach.reply_type == "negative"
     with pytest.raises(ValidationError):
         LeadSource(
             name="Unknown",

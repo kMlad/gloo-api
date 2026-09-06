@@ -18,7 +18,7 @@ class HeyReachRepository:
         query = self._db.table("heyreach_campaigns").select("*")
         if enabled_only:
             query = query.eq("enabled", True)
-        response = await query.order("heyreach_campaign_id").execute()
+        response = await query.order("heyreach_campaign_id", desc=True).execute()
         return response.data
 
     async def sync_campaign_catalog(
@@ -127,7 +127,7 @@ class HeyReachRepository:
             "id": run["id"],
             "status": run.get("status"),
             "campaign_ids": run.get("campaign_ids") or [],
-            "reply_types": ["positive"],
+            "reply_types": list(run.get("reply_types") or ["positive"]),
             "leads_processed": run.get("leads_processed") or 0,
             "conversations_processed": run.get("conversations_processed") or 0,
             "qualifying_conversation_count": run.get("qualifying_conversation_count")
@@ -219,6 +219,30 @@ class HeyReachRepository:
         )
         return response.data[0] if response.data else None
 
+    async def get_conversation(
+        self, *, campaign_id: int, heyreach_conversation_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("heyreach_conversations")
+            .select("*")
+            .eq("heyreach_campaign_id", campaign_id)
+            .eq("heyreach_conversation_id", heyreach_conversation_id)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def update_conversation(
+        self, conversation_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("heyreach_conversations")
+            .update({**values, "updated_at": to_iso(utc_now())})
+            .eq("id", conversation_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
     async def expire_stale_imports(self) -> None:
         now = utc_now()
         cutoff = now - timedelta(hours=2)
@@ -246,6 +270,7 @@ class HeyReachRepository:
         self,
         *,
         campaign_ids: list[int],
+        reply_types: list[str],
         reply_time_from: str | None,
         reply_time_to: str | None,
         max_conversations: int,
@@ -260,6 +285,7 @@ class HeyReachRepository:
                     {
                         "status": "queued",
                         "campaign_ids": campaign_ids,
+                        "reply_types": reply_types,
                         "reply_time_from": reply_time_from,
                         "reply_time_to": reply_time_to,
                         "max_conversations": max_conversations,

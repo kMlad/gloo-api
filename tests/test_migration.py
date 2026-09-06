@@ -440,3 +440,16 @@ def test_heyreach_sender_name_migration_is_additive() -> None:
     assert "linkedin_sender_name = coalesce(" in migration
     assert "drop column" not in migration
 
+
+def test_heyreach_auto_tag_migration_is_additive_and_constrained() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_heyreach_auto_tag_reply_types.sql")
+    ).read_text()
+    assert "add column auto_tag text" in migration
+    assert "add column reply_types text[] not null default" in migration
+    assert "reply_type in ('positive', 'ooo', 'negative')" in migration
+    assert "array['positive', 'ooo']::text[]" in migration
+    assert "heyreach_conversations_reply_type_lead_id_idx" in migration
+    assert "auto_tag = coalesce(" in migration
+    assert "drop column" not in migration
+

@@ -160,9 +160,12 @@ SmartLead and HeyReach threads are refreshed when older than
 ## HeyReach workflow
 
 Discover HeyReach campaigns and see which ones have already supplied imported
-leads. HeyReach imports LinkedIn replies (`MessageReply` / InMail replies), the
-same sales-handoff role as SmartLead positive replies. LinkedIn profiles are
-enough to create a lead; email is optional.
+leads. HeyReach imports LinkedIn replies (`MessageReply` / InMail replies) whose
+Auto-Tag is **Interested** by default, the same sales-handoff role as SmartLead
+positive replies. Generic (OOO / unclear) replies can be included with
+`reply_types: ["ooo"]` or `["positive", "ooo"]`. Not Interested replies are
+never imported, so they are not attached to a phone-enrichment snapshot.
+LinkedIn profiles are enough to create a lead; email is optional.
 
 ```shell
 curl http://127.0.0.1:8000/api/v1/heyreach/campaigns \
@@ -176,15 +179,17 @@ curl -X POST http://127.0.0.1:8000/api/v1/heyreach/imports \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
   -H "Idempotency-Key: heyreach-import-2026-09-06-01" \
   -H "Content-Type: application/json" \
-  -d '{"campaign_ids": [90486]}'
+  -d '{"campaign_ids": [90486], "reply_types": ["positive"]}'
 ```
 
 An import may also specify timezone-aware `reply_time_from` and `reply_time_to`
 values. Omitting `campaign_ids` imports all campaigns whose legacy `enabled`
 flag is true. The endpoint returns **202** with a durable run record; only one
-import may be queued or running for the same campaign at a time. Imports over
-`HEYREACH_IMPORT_LIMIT` are rejected before conversation histories are read.
-HeyReach calls are throttled below its documented 300 requests/minute limit.
+import may be queued or running for the same campaign at a time. The import
+limit (`HEYREACH_IMPORT_LIMIT`) applies to Auto-Tag matches, not every LinkedIn
+reply. Untagged replies (HeyReach writes the tag about 15 minutes after the
+first reply) are skipped and can be picked up on a later run. HeyReach calls
+are throttled below its documented 300 requests/minute limit.
 
 Inspect import history and the exact leads captured by a run:
 

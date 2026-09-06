@@ -12,6 +12,7 @@ PhoneSource = Literal[
     "fullenrich",
 ]
 ReplyType = Literal["positive", "ooo"]
+StoredReplyType = Literal["positive", "ooo", "negative"]
 LeadPlatform = Literal["smartlead", "heyreach"]
 AppRole = Literal["admin", "sales_lead", "sdr"]
 AssignmentStatus = Literal["assigned", "unassigned"]
@@ -197,11 +198,13 @@ class HeyReachCampaignResponse(BaseModel):
 
 class HeyReachImportRequest(BaseModel):
     campaign_ids: list[int] | None = None
+    reply_types: list[ReplyType] = Field(default_factory=lambda: ["positive"])
     reply_time_from: datetime | None = None
     reply_time_to: datetime | None = None
 
     @model_validator(mode="after")
     def validate_filters(self) -> "HeyReachImportRequest":
+        _validate_reply_types(self.reply_types)
         if self.campaign_ids is not None:
             if not self.campaign_ids:
                 raise ValueError("campaign_ids must not be empty")
@@ -229,6 +232,7 @@ class HeyReachImportRunResponse(BaseModel):
         "queued", "running", "succeeded", "partial", "failed", "rejected"
     ]
     campaign_ids: list[int]
+    reply_types: list[ReplyType] = Field(default_factory=lambda: ["positive"])
     reply_time_from: datetime | None
     reply_time_to: datetime | None
     requested_by: UUID | None = None
@@ -255,7 +259,7 @@ class LeadSource(BaseModel):
     smartlead_campaign_id: int | None = None
     heyreach_campaign_id: int | None = None
     name: str
-    reply_type: ReplyType | None
+    reply_type: StoredReplyType | None
     qualified_at: datetime
 
     @model_validator(mode="after")
