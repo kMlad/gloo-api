@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.models import (
     CampaignCreate,
+    CampaignResponse,
     CampaignUpdate,
     ImportRequest,
     InviteUserRequest,
@@ -54,6 +55,21 @@ def test_import_reply_types_are_per_request_and_validated() -> None:
         ImportRequest(reply_types=[])
     with pytest.raises(ValidationError):
         ImportRequest(reply_types=["ooo", "ooo"])
+
+
+def test_campaign_response_defaults_last_imports_per_reply_type() -> None:
+    now = "2026-09-06T10:00:00Z"
+    campaign = CampaignResponse(
+        smartlead_campaign_id=10,
+        name="Campaign",
+        enabled=True,
+        reply_types=["positive", "ooo"],
+        created_at=now,
+        updated_at=now,
+    )
+    assert campaign.last_imports.positive is None
+    assert campaign.last_imports.ooo is None
+    assert campaign.last_import_run_id is None
 
 
 def test_phone_enrichment_import_source_is_exclusive_with_lead_ids() -> None:

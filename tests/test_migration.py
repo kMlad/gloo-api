@@ -345,3 +345,36 @@ def test_lead_chat_history_migration_is_additive_and_constrained() -> None:
     assert "add column direction text not null default 'inbound'" in migration
     assert "direction in ('inbound', 'outbound')" in migration
     assert "drop column" not in migration
+
+
+def test_campaign_import_scopes_replace_the_global_lock() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_campaign_import_scopes.sql")
+    ).read_text()
+
+    assert "create table public.smartlead_import_run_scopes" in migration
+    assert "smartlead_import_run_scopes_one_active_idx" in migration
+    assert "(smartlead_campaign_id, reply_type)" in migration
+    assert "drop index if exists public.smartlead_import_runs_one_active_idx" in migration
+    assert "create or replace function public.latest_smartlead_imports" in migration
+    assert "phone_enrichment_runs_one_active_per_import_idx" in migration
+    assert "alter table public.smartlead_import_run_scopes enable row level security" in (
+        migration
+    )
+    assert (
+        "revoke all on table public.smartlead_import_run_scopes\n"
+        "    from public, anon, authenticated"
+    ) in migration
+    assert (
+        "grant select, insert, update, delete on table public.smartlead_import_run_scopes\n"
+        "    to service_role"
+    ) in migration
+    assert (
+        "revoke execute on function public.latest_smartlead_imports(bigint[])\n"
+        "    from public, anon, authenticated"
+    ) in migration
+    assert (
+        "grant execute on function public.latest_smartlead_imports(bigint[]) "
+        "to service_role"
+    ) in migration
+

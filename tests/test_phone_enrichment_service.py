@@ -7,6 +7,7 @@ import pytest
 from app.phone_enrichment.providers.base import ProviderResult
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
 from app.phone_enrichment.service import (
+    EnrichmentNotFoundError,
     InvalidWebhookError,
     PhoneEnrichmentService,
     ReconciliationTooSoonError,
@@ -180,6 +181,29 @@ class FakeEnrichmentRepository:
             ]
             detail["items"].append(item_copy)
         return detail
+
+    async def get_latest_run_for_import(self, import_run_id):
+        matches = [
+            run
+            for run in self.runs.values()
+            if run.get("source_import_run_id") == import_run_id
+        ]
+        if not matches:
+            return None
+        latest = max(matches, key=lambda run: (run["created_at"], run["id"]))
+        return await self.get_run_detail(str(latest["id"]))
+
+    async def get_active_run_for_import(self, import_run_id):
+        matches = [
+            run
+            for run in self.runs.values()
+            if run.get("source_import_run_id") == import_run_id
+            and run["status"] in {"queued", "running", "waiting"}
+        ]
+        if not matches:
+            return None
+        latest = max(matches, key=lambda run: (run["created_at"], run["id"]))
+        return deepcopy(latest)
 
     async def get_attempts_by_external_id(self, external_id):
         return [
@@ -436,3 +460,34 @@ async def test_fullenrich_callback_completes_waiting_run_and_is_replay_safe() ->
     assert completed["status"] == "succeeded"
     assert repository.lead["phone_source"] == "fullenrich"
     assert calls == ["leadmagic", "prospeo", "airscale", "fullenrich"]
+
+
+@pytest.mark.asyncio
+async def test_latest_enrichment_can_be_looked_up_by_import_run() -> None:
+    lead_id = str(uuid4())
+    import_run_id = str(uuid4())
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "enriched_phone_number": None,
+            "phone_source": None,
+            "inbound_replies": [
+                {"id": "reply-1", "received_at": _now(), "body": "+14155552671"}
+            ],
+        }
+    )
+    calls: list[str] = []
+    no_result = ProviderResult(status="not_found", request_payload={})
+    service = _service(repository, calls, no_result, no_result, no_result)
+
+    created = await service.run(
+        PhoneEnrichmentRequest(source_import_run_id=import_run_id),
+        "import-run-enrichment-lookup",
+    )
+    latest = await service.get_latest_for_import(import_run_id)
+
+    assert latest["id"] == created["id"]
+    assert latest["source_import_run_id"] == import_run_id
+    with pytest.raises(EnrichmentNotFoundError):
+        await service.get_latest_for_import(str(uuid4()))

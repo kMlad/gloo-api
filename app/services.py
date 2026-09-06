@@ -502,7 +502,9 @@ class ImportService:
             ):
                 for campaign_id in campaign_ids:
                     await self._repository.clear_unmatched_conversation_reply_types(
-                        campaign_id, active_map_ids_by_campaign[campaign_id]
+                        campaign_id,
+                        active_map_ids_by_campaign[campaign_id],
+                        reply_types=list(request.reply_types),
                     )
 
             return await self._finish_run(

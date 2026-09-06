@@ -7,6 +7,7 @@ from fastapi import (
     Depends,
     Header,
     HTTPException,
+    Query,
     Response,
     status,
 )
@@ -70,6 +71,21 @@ async def create_phone_enrichment(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+
+
+@internal_router.get(
+    "",
+    response_model=PhoneEnrichmentRunResponse,
+    dependencies=[Depends(require_internal_or_admin_or_sales_lead)],
+)
+async def get_phone_enrichment_for_import(
+    service: ServiceDependency,
+    source_import_run_id: UUID = Query(...),
+) -> dict[str, Any]:
+    try:
+        return await service.get_latest_for_import(str(source_import_run_id))
+    except EnrichmentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @internal_router.get(

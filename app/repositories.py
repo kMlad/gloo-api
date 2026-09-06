@@ -83,13 +83,9 @@ class Repository:
             .in_("smartlead_campaign_id", campaign_ids)
             .execute()
         )
-        items_response = await (
-            self._db.table("smartlead_import_run_items")
-            .select("run_id,smartlead_campaign_id,created_at")
-            .in_("smartlead_campaign_id", campaign_ids)
-            .order("created_at", desc=True)
-            .execute()
-        )
+        latest_response = await self._db.rpc(
+            "latest_smartlead_imports", {"p_campaign_ids": campaign_ids}
+        ).execute()
         stats: dict[int, dict[str, Any]] = {}
         lead_sets: dict[int, set[str]] = {}
         positive_sets: dict[int, set[str]] = {}
@@ -102,7 +98,9 @@ class Repository:
                 positive_sets.setdefault(campaign_id, set()).add(lead_id)
             elif conversation.get("reply_type") == "ooo":
                 ooo_sets.setdefault(campaign_id, set()).add(lead_id)
+        last_imports: dict[int, dict[str, dict[str, Any] | None]] = {}
         for campaign_id in campaign_ids:
+            last_imports[campaign_id] = {"positive": None, "ooo": None}
             stats[campaign_id] = {
                 "ever_imported": bool(lead_sets.get(campaign_id)),
                 "imported_lead_count": len(lead_sets.get(campaign_id, set())),
@@ -110,13 +108,99 @@ class Repository:
                 "ooo_lead_count": len(ooo_sets.get(campaign_id, set())),
                 "last_imported_at": None,
                 "last_import_run_id": None,
+                "last_imports": last_imports[campaign_id],
             }
-        for item in items_response.data:
+        run_ids: list[str] = []
+        latest_rows: list[tuple[int, str, dict[str, Any]]] = []
+        for item in latest_response.data:
+            reply_type = item.get("reply_type")
+            if reply_type not in {"positive", "ooo"}:
+                continue
+            run = item.get("run")
+            if not isinstance(run, dict) or run.get("id") is None:
+                continue
             campaign_id = int(item["smartlead_campaign_id"])
-            if stats[campaign_id]["last_imported_at"] is None:
-                stats[campaign_id]["last_imported_at"] = item["created_at"]
-                stats[campaign_id]["last_import_run_id"] = item["run_id"]
+            latest_rows.append((campaign_id, reply_type, run))
+            run_ids.append(str(run["id"]))
+        enrichments = await self.get_latest_phone_enrichments_by_import_run(run_ids)
+        for campaign_id, reply_type, run in latest_rows:
+            snapshot = self._campaign_last_import(
+                run, enrichments.get(str(run["id"]))
+            )
+            last_imports[campaign_id][reply_type] = snapshot
+        for campaign_id, typed_imports in last_imports.items():
+            overall = max(
+                (
+                    snapshot
+                    for snapshot in typed_imports.values()
+                    if snapshot is not None
+                ),
+                key=lambda snapshot: (
+                    str(snapshot.get("started_at") or ""),
+                    str(snapshot.get("id") or ""),
+                ),
+                default=None,
+            )
+            if overall is None:
+                continue
+            stats[campaign_id]["last_import_run_id"] = overall["id"]
+            stats[campaign_id]["last_imported_at"] = (
+                overall.get("completed_at") or overall.get("started_at")
+            )
         return stats
+
+    @staticmethod
+    def _campaign_last_import(
+        run: dict[str, Any], enrichment: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        return {
+            "id": run["id"],
+            "status": run.get("status"),
+            "campaign_ids": run.get("campaign_ids") or [],
+            "reply_types": run.get("reply_types") or [],
+            "leads_processed": run.get("leads_processed") or 0,
+            "conversations_processed": run.get("conversations_processed") or 0,
+            "qualifying_conversation_count": run.get("qualifying_conversation_count")
+            or 0,
+            "errors": run.get("errors") or [],
+            "started_at": run.get("started_at"),
+            "completed_at": run.get("completed_at"),
+            "last_enrichment": enrichment,
+        }
+
+    async def get_latest_phone_enrichments_by_import_run(
+        self, import_run_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        unique_ids = list(dict.fromkeys(import_run_ids))
+        if not unique_ids:
+            return {}
+        response = await (
+            self._db.table("phone_enrichment_runs")
+            .select("*")
+            .in_("source_import_run_id", unique_ids)
+            .order("created_at", desc=True)
+            .order("id")
+            .execute()
+        )
+        latest: dict[str, dict[str, Any]] = {}
+        for row in response.data:
+            source_id = row.get("source_import_run_id")
+            if source_id is None:
+                continue
+            key = str(source_id)
+            if key not in latest:
+                latest[key] = row
+        return latest
+
+    async def attach_last_enrichments(
+        self, runs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        enrichments = await self.get_latest_phone_enrichments_by_import_run(
+            [str(run["id"]) for run in runs if run.get("id") is not None]
+        )
+        for run in runs:
+            run["last_enrichment"] = enrichments.get(str(run["id"]))
+        return runs
 
     async def get_campaigns_by_ids(
         self, campaign_ids: list[int]
@@ -728,8 +812,10 @@ class Repository:
         return response.data[0] if response.data else None
 
     async def clear_unmatched_conversation_reply_types(
-        self, campaign_id: int, active_map_ids: set[str]
+        self, campaign_id: int, active_map_ids: set[str], *, reply_types: list[str]
     ) -> int:
+        if not reply_types:
+            return 0
         response = await (
             self._db.table("smartlead_conversations")
             .select("id,smartlead_campaign_lead_map_id,reply_type")
@@ -739,7 +825,7 @@ class Repository:
         stale_ids = [
             str(item["id"])
             for item in response.data
-            if item.get("reply_type") is not None
+            if item.get("reply_type") in reply_types
             and str(item["smartlead_campaign_lead_map_id"]) not in active_map_ids
         ]
         now = to_iso(utc_now())

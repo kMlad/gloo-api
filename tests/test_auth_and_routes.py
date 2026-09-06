@@ -229,6 +229,12 @@ class PhoneEnrichmentServiceStub:
             "items": [],
         }
 
+    async def get_latest_for_import(self, import_run_id: str):
+        detail = await self.get_run_detail(import_run_id)
+        detail["selection_mode"] = "import_run"
+        detail["source_import_run_id"] = import_run_id
+        return detail
+
     async def reconcile(self, run_id: str):
         return await self.get_run_detail(run_id)
 
@@ -306,6 +312,20 @@ class CampaignRepositoryStub:
             "completed_at": now,
         }
         return self.import_run
+
+    async def get_import_run(self, run_id):
+        if self.import_run and self.import_run["id"] == run_id:
+            return self.import_run
+        return None
+
+    async def list_import_runs(self, *, limit, offset):
+        items = [self.import_run] if self.import_run and offset == 0 else []
+        return items[:limit], 1 if self.import_run else 0
+
+    async def attach_last_enrichments(self, runs):
+        for run in runs:
+            run.setdefault("last_enrichment", None)
+        return runs
 
 
 class SmartLeadCampaignStub:
@@ -834,6 +854,15 @@ async def test_admin_and_sales_lead_can_list_campaigns_and_enrich_phones(
             headers={**headers, "Idempotency-Key": "sales-import-key"},
             json={"campaign_ids": [10], "reply_types": ["positive", "ooo"]},
         )
+        import_id = imported.json()["id"]
+        import_detail = await client.get(
+            f"/api/v1/smartlead/imports/{import_id}", headers=headers
+        )
+        by_import = await client.get(
+            "/api/v1/phone-enrichments",
+            headers=headers,
+            params={"source_import_run_id": import_id},
+        )
         write_campaign = await client.post(
             "/api/v1/smartlead/campaigns",
             headers=headers,
@@ -842,11 +871,16 @@ async def test_admin_and_sales_lead_can_list_campaigns_and_enrich_phones(
 
     assert campaigns.status_code == 200
     assert campaigns.json()[0]["smartlead_campaign_id"] == 10
+    assert campaigns.json()[0]["last_imports"] == {"positive": None, "ooo": None}
     assert create.status_code == 202
     assert detail.status_code == 200
     assert reconcile.status_code == 200
     assert imported.status_code == 202
     assert imported.json()["reply_types"] == ["positive", "ooo"]
+    assert import_detail.status_code == 200
+    assert import_detail.json()["last_enrichment"] is None
+    assert by_import.status_code == 200
+    assert by_import.json()["source_import_run_id"] == import_id
     assert write_campaign.status_code == 401
     assert service.calls[0][1] == "manual-run-key"
 

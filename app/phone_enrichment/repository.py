@@ -109,6 +109,37 @@ class EnrichmentRepository:
         )
         return response.data[0] if response.data else None
 
+    async def get_latest_run_for_import(
+        self, import_run_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("phone_enrichment_runs")
+            .select("id")
+            .eq("source_import_run_id", import_run_id)
+            .order("created_at", desc=True)
+            .order("id")
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return await self.get_run_detail(str(response.data[0]["id"]))
+
+    async def get_active_run_for_import(
+        self, import_run_id: str
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("phone_enrichment_runs")
+            .select("*")
+            .eq("source_import_run_id", import_run_id)
+            .in_("status", ["queued", "running", "waiting"])
+            .order("created_at", desc=True)
+            .order("id")
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
     async def update_run(self, run_id: str, values: dict[str, Any]) -> dict[str, Any]:
         response = await (
             self._db.table("phone_enrichment_runs")

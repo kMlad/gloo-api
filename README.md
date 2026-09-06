@@ -76,9 +76,13 @@ curl http://127.0.0.1:8000/api/v1/smartlead/campaigns \
 ```
 
 The response is synchronized from SmartLead and includes campaign status, tags,
-`ever_imported`, imported lead counts by reply type, and the most recent import
-run. `enabled` remains available for legacy scheduled or all-enabled imports;
-sales leads can explicitly import any campaign returned by discovery.
+`ever_imported`, imported lead counts by reply type, and the latest import run
+for Positive and OOO (`last_imports.positive` and `last_imports.ooo`). Each of
+those snapshots includes status, lead counts, and the latest phone enrichment
+for that import when one exists. `last_import_run_id` remains the most recent
+run across both types. `enabled` remains available for legacy scheduled or
+all-enabled imports; sales leads can explicitly import any campaign returned by
+discovery.
 
 Queue a positive-reply import for selected campaigns:
 
@@ -99,18 +103,26 @@ flag is true.
 
 The endpoint returns **202** with a durable run record in `queued` status; the
 import then runs as an API background task. The idempotency key makes a
-retry return the original run. Only one SmartLead import may be queued or
-running at a time, and imports over `SMARTLEAD_IMPORT_LIMIT` are rejected before
-reply histories are read. SmartLead calls are throttled within the API process
-below its documented API-key limit.
+retry return the original run. Only one import may be queued or running for the
+same campaign and reply type at a time; Positive and OOO for the same campaign
+(or imports for different campaigns) can run together. Imports over
+`SMARTLEAD_IMPORT_LIMIT` are rejected before reply histories are read. SmartLead
+calls are throttled within the API process below its documented API-key limit.
 
-Inspect import history, status, and the exact leads captured by a run:
+Inspect import history, status, the latest enrichment for a run, and the exact
+leads captured by a run:
 
 ```text
 GET /api/v1/smartlead/imports?limit=25&offset=0
 GET /api/v1/smartlead/imports/{run_id}
 GET /api/v1/smartlead/imports/{run_id}/leads
+GET /api/v1/phone-enrichments?source_import_run_id={run_id}
 ```
+
+`GET /api/v1/smartlead/imports/{run_id}` includes `last_enrichment` when a phone
+enrichment has been started for that import. The query on `/phone-enrichments`
+returns the latest enrichment for the import, including item-level progress, so
+status survives a browser refresh without remembering the enrichment id.
 
 Imports atomically persist each lead with its SmartLead conversation. To repair
 legacy leads whose conversation row was not written, rerun the import with the
@@ -192,9 +204,12 @@ to enrich the newest eligible leads (`limit` defaults to 25 and is capped at
 The service checks inbound reply signatures first, then LeadMagic, Prospeo,
 AirScale, and FullEnrich, stopping at the first valid E.164 number. FullEnrich
 runs may remain in `waiting` until its authenticated webhook arrives. Inspect a
-run with `GET /api/v1/phone-enrichments/{run_id}` or use
-`POST /api/v1/phone-enrichments/{run_id}/reconcile` after five minutes if a
-callback needs reconciliation.
+run with `GET /api/v1/phone-enrichments/{run_id}`, look up the latest enrichment
+for an import with `GET /api/v1/phone-enrichments?source_import_run_id={run_id}`,
+or use `POST /api/v1/phone-enrichments/{run_id}/reconcile` after five minutes if a
+callback needs reconciliation. Starting a second enrichment for an import that
+already has a queued, running, or waiting run returns that active run instead of
+creating a duplicate.
 
 Provider requests, responses, statuses, and safe errors are retained with each
 run. API keys and authorization headers are never written to audit records.

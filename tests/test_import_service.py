@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 
 from app.models import ImportRequest
+from app.repositories import ConcurrentImportError
 from app.services import ImportLimitExceeded, ImportService
 from app.smartlead.client import SmartLeadError
 from app.utils import merge_non_empty
@@ -42,6 +43,15 @@ class FakeRepository:
         ]
 
     async def create_import_run(self, **values):
+        campaign_ids = set(values["campaign_ids"])
+        reply_types = set(values["reply_types"])
+        for run in self.runs.values():
+            if run["status"] not in {"queued", "running"}:
+                continue
+            overlapping_campaigns = campaign_ids & set(run["campaign_ids"])
+            overlapping_types = reply_types & set(run["reply_types"])
+            if overlapping_campaigns and overlapping_types:
+                raise ConcurrentImportError
         run_id = str(uuid4())
         run = {
             "id": run_id,
@@ -159,15 +169,16 @@ class FakeRepository:
         return deepcopy(reply)
 
     async def clear_unmatched_conversation_reply_types(
-        self, campaign_id, active_map_ids
+        self, campaign_id, active_map_ids, *, reply_types
     ):
         self.clear_calls.append((campaign_id, set(active_map_ids)))
+        allowed = set(reply_types)
         cleared = 0
         for (stored_campaign_id, map_id), conversation in self.conversations.items():
             if (
                 stored_campaign_id == campaign_id
                 and map_id not in active_map_ids
-                and conversation.get("reply_type") is not None
+                and conversation.get("reply_type") in allowed
             ):
                 conversation["reply_type"] = None
                 cleared += 1
@@ -640,6 +651,106 @@ async def test_unbounded_import_updates_or_clears_current_classification() -> No
     assert repository.conversations[(10, "map-10")]["reply_type"] is None
 
 
+class SplitReplySmartLead:
+    def __init__(self, *, positive: bool = True, ooo: bool = True) -> None:
+        self.positive = positive
+        self.ooo = ooo
+
+    async def get_categories(self):
+        return [
+            {"id": 1, "name": "Interested", "sentiment_type": "positive"},
+            {"id": 6, "name": "Out-of-Office", "sentiment_type": None},
+        ]
+
+    def _messages(self, category_ids: list[int], *, fetch_message_history: bool):
+        specs: list[tuple[int, str, str, str, str]] = []
+        if self.positive and 1 in category_ids:
+            specs.append((1, "map-pos", "positive@example.com", "Interested", "Yes"))
+        if self.ooo and 6 in category_ids:
+            specs.append((6, "map-ooo", "ooo@example.com", "Out Of Office", "Out of office"))
+        messages = []
+        for category_id, map_id, email, category_name, body in specs:
+            item = {
+                "email_campaign_id": 10,
+                "email_lead_map_id": map_id,
+                "email_lead_id": map_id,
+                "lead_email": email,
+                "lead_first_name": "Pat",
+                "lead_category_id": category_id,
+                "category_name": category_name,
+            }
+            if fetch_message_history:
+                item["email_history"] = [
+                    {
+                        "message_id": f"reply-{map_id}",
+                        "type": "REPLY",
+                        "time": "2026-08-01T10:00:00Z",
+                        "email_body": body,
+                    }
+                ]
+            messages.append(item)
+        return messages
+
+    async def get_inbox_page(
+        self,
+        *,
+        campaign_ids,
+        category_ids,
+        fetch_message_history,
+        offset,
+        **kwargs,
+    ):
+        if offset or 10 not in campaign_ids:
+            return {"messages": []}
+        return {"messages": self._messages(category_ids, fetch_message_history=fetch_message_history)}
+
+    async def get_campaign_leads_page(self, *, campaign_id, category_id, offset, **kwargs):
+        if offset or campaign_id != 10:
+            return {"data": []}
+        messages = self._messages([category_id], fetch_message_history=False)
+        return {
+            "data": [
+                {
+                    "campaign_lead_map_id": item["email_lead_map_id"],
+                    "lead": {
+                        "id": item["email_lead_id"],
+                        "email": item["lead_email"],
+                        "first_name": item["lead_first_name"],
+                    },
+                }
+                for item in messages
+            ]
+        }
+
+
+@pytest.mark.asyncio
+async def test_subset_import_does_not_clear_other_reply_types() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {
+                "smartlead_campaign_id": 10,
+                "name": "Mixed",
+                "enabled": True,
+                "reply_types": ["positive", "ooo"],
+            }
+        ]
+    )
+    smartlead = SplitReplySmartLead()
+    service = ImportService(repository, smartlead, max_conversations=1000)
+
+    await service.run(ImportRequest(campaign_ids=[10], reply_types=["positive"]))
+    await service.run(ImportRequest(campaign_ids=[10], reply_types=["ooo"]))
+
+    assert repository.conversations[(10, "map-pos")]["reply_type"] == "positive"
+    assert repository.conversations[(10, "map-ooo")]["reply_type"] == "ooo"
+
+    smartlead.ooo = False
+    await service.run(ImportRequest(campaign_ids=[10], reply_types=["ooo"]))
+
+    assert repository.conversations[(10, "map-pos")]["reply_type"] == "positive"
+    assert repository.conversations[(10, "map-ooo")]["reply_type"] is None
+
+
 @pytest.mark.asyncio
 async def test_date_bounded_import_does_not_clear_missing_classification() -> None:
     repository = FakeRepository(
@@ -693,3 +804,33 @@ async def test_partial_import_does_not_clear_existing_classifications() -> None:
     assert result["status"] == "partial"
     assert repository.conversations[(10, "map-10")]["reply_type"] == "ooo"
     assert len(repository.clear_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_import_lock_is_per_campaign_and_reply_type() -> None:
+    repository = FakeRepository(
+        campaigns=[
+            {"smartlead_campaign_id": 10, "name": "A", "enabled": True},
+            {"smartlead_campaign_id": 11, "name": "B", "enabled": True},
+        ]
+    )
+    service = ImportService(repository, FakeSmartLead(), max_conversations=1000)
+
+    positive = await service.start(
+        ImportRequest(campaign_ids=[10], reply_types=["positive"])
+    )
+    ooo = await service.start(ImportRequest(campaign_ids=[10], reply_types=["ooo"]))
+    other = await service.start(
+        ImportRequest(campaign_ids=[11], reply_types=["positive"])
+    )
+
+    assert positive["status"] == "queued"
+    assert ooo["status"] == "queued"
+    assert other["status"] == "queued"
+    with pytest.raises(ConcurrentImportError):
+        await service.start(ImportRequest(campaign_ids=[10], reply_types=["positive"]))
+    with pytest.raises(ConcurrentImportError):
+        await service.start(
+            ImportRequest(campaign_ids=[10, 11], reply_types=["positive"])
+        )
+

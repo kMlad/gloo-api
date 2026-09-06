@@ -500,3 +500,104 @@ async def test_insert_leads_inserts_payload_batch() -> None:
 
     assert inserted == stored
     assert database.calls[0][0:2] == ("leads", "insert")
+
+
+@pytest.mark.asyncio
+async def test_campaign_import_stats_return_latest_run_per_reply_type() -> None:
+    positive_run = {
+        "id": "run-positive",
+        "status": "succeeded",
+        "campaign_ids": [10],
+        "reply_types": ["positive"],
+        "leads_processed": 3,
+        "conversations_processed": 3,
+        "qualifying_conversation_count": 3,
+        "errors": [],
+        "started_at": "2026-09-01T10:00:00Z",
+        "completed_at": "2026-09-01T10:05:00Z",
+        "created_at": "2026-09-01T10:00:00Z",
+    }
+    ooo_run = {
+        "id": "run-ooo",
+        "status": "running",
+        "campaign_ids": [10],
+        "reply_types": ["ooo"],
+        "leads_processed": 0,
+        "conversations_processed": 0,
+        "qualifying_conversation_count": 0,
+        "errors": [],
+        "started_at": "2026-09-06T10:00:00Z",
+        "completed_at": None,
+        "created_at": "2026-09-06T10:00:00Z",
+    }
+    enrichment = {
+        "id": "enrich-positive",
+        "status": "partial",
+        "source_import_run_id": "run-positive",
+        "selection_mode": "import_run",
+        "leads_selected": 3,
+        "leads_enriched": 1,
+        "leads_not_found": 2,
+        "leads_skipped": 0,
+        "leads_failed": 0,
+        "errors": [],
+        "started_at": "2026-09-01T11:00:00Z",
+        "completed_at": "2026-09-01T11:10:00Z",
+        "created_at": "2026-09-01T11:00:00Z",
+        "updated_at": "2026-09-01T11:10:00Z",
+    }
+    database = DatabaseStub(
+        {
+            "smartlead_conversations": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "lead_id": "lead-1",
+                            "smartlead_campaign_id": 10,
+                            "reply_type": "positive",
+                        },
+                        {
+                            "lead_id": "lead-2",
+                            "smartlead_campaign_id": 10,
+                            "reply_type": "ooo",
+                        },
+                    ]
+                )
+            ],
+            "latest_smartlead_imports": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "smartlead_campaign_id": 10,
+                            "reply_type": "positive",
+                            "run": positive_run,
+                        },
+                        {
+                            "smartlead_campaign_id": 10,
+                            "reply_type": "ooo",
+                            "run": ooo_run,
+                        },
+                    ]
+                )
+            ],
+            "phone_enrichment_runs": [SimpleNamespace(data=[enrichment])],
+        }
+    )
+
+    stats = await Repository(database).get_campaign_import_stats([10])
+
+    assert stats[10]["positive_lead_count"] == 1
+    assert stats[10]["ooo_lead_count"] == 1
+    assert stats[10]["last_import_run_id"] == "run-ooo"
+    assert stats[10]["last_imported_at"] == "2026-09-06T10:00:00Z"
+    assert stats[10]["last_imports"]["positive"]["id"] == "run-positive"
+    assert stats[10]["last_imports"]["positive"]["last_enrichment"]["id"] == (
+        "enrich-positive"
+    )
+    assert stats[10]["last_imports"]["ooo"]["id"] == "run-ooo"
+    assert stats[10]["last_imports"]["ooo"]["status"] == "running"
+    assert stats[10]["last_imports"]["ooo"]["last_enrichment"] is None
+    assert ("latest_smartlead_imports", "rpc", ({"p_campaign_ids": [10]},), {}) in (
+        database.calls
+    )
+

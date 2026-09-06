@@ -139,7 +139,11 @@ async def create_import(
         return run
     except ConcurrentImportError as exc:
         raise HTTPException(
-            status_code=409, detail="A SmartLead import is already running"
+            status_code=409,
+            detail=(
+                "A SmartLead import is already queued or running for an overlapping "
+                "campaign and reply type"
+            ),
         ) from exc
     except ImportLimitExceeded as exc:
         raise HTTPException(
@@ -164,6 +168,7 @@ async def get_import(run_id: UUID, repository: RepositoryDependency) -> dict:
     result = await repository.get_import_run(str(run_id))
     if result is None:
         raise HTTPException(status_code=404, detail="Import run not found")
+    await repository.attach_last_enrichments([result])
     return result
 
 
@@ -178,6 +183,7 @@ async def list_imports(
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     items, total = await repository.list_import_runs(limit=limit, offset=offset)
+    await repository.attach_last_enrichments(items)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 

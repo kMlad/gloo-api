@@ -55,6 +55,44 @@ class CampaignUpdate(BaseModel):
         return self
 
 
+class PhoneEnrichmentStatus(BaseModel):
+    id: UUID
+    status: Literal["queued", "running", "waiting", "succeeded", "partial", "failed"]
+    selection_mode: Literal["selected", "eligible", "import_run"] | None = None
+    source_import_run_id: UUID | None = None
+    leads_selected: int = 0
+    leads_enriched: int = 0
+    leads_not_found: int = 0
+    leads_skipped: int = 0
+    leads_failed: int = 0
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    started_at: datetime
+    completed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignLastImport(BaseModel):
+    id: UUID
+    status: Literal[
+        "queued", "running", "succeeded", "partial", "failed", "rejected"
+    ]
+    campaign_ids: list[int] = Field(default_factory=list)
+    reply_types: list[ReplyType] = Field(default_factory=list)
+    leads_processed: int = 0
+    conversations_processed: int = 0
+    qualifying_conversation_count: int = 0
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    started_at: datetime
+    completed_at: datetime | None = None
+    last_enrichment: PhoneEnrichmentStatus | None = None
+
+
+class CampaignLastImports(BaseModel):
+    positive: CampaignLastImport | None = None
+    ooo: CampaignLastImport | None = None
+
+
 class CampaignResponse(BaseModel):
     smartlead_campaign_id: int
     name: str
@@ -68,6 +106,7 @@ class CampaignResponse(BaseModel):
     ooo_lead_count: int = 0
     last_imported_at: datetime | None = None
     last_import_run_id: UUID | None = None
+    last_imports: CampaignLastImports = Field(default_factory=CampaignLastImports)
     created_at: datetime
     updated_at: datetime
 
@@ -122,6 +161,7 @@ class ImportRunResponse(BaseModel):
     errors: list[dict[str, Any]]
     started_at: datetime
     completed_at: datetime | None
+    last_enrichment: PhoneEnrichmentStatus | None = None
 
 
 class ImportRunListResponse(BaseModel):

@@ -138,6 +138,17 @@ class PhoneEnrichmentService:
                 idempotency_key
             )
             if existing is None or existing["request_fingerprint"] != fingerprint:
+                if source_import_run_id is not None:
+                    active = await self._repository.get_active_run_for_import(
+                        source_import_run_id
+                    )
+                    if active is not None:
+                        detail = await self._repository.get_run_detail(str(active["id"]))
+                        if detail is None:
+                            raise EnrichmentNotFoundError(
+                                "Enrichment run not found"
+                            ) from exc
+                        return detail
                 raise EnrichmentConflictError(
                     "Idempotency-Key was already used for a different request"
                 ) from exc
@@ -610,6 +621,12 @@ class PhoneEnrichmentService:
         detail = await self._repository.get_run_detail(run_id)
         if detail is None:
             raise EnrichmentNotFoundError("Enrichment run not found")
+        return detail
+
+    async def get_latest_for_import(self, import_run_id: str) -> dict[str, Any]:
+        detail = await self._repository.get_latest_run_for_import(import_run_id)
+        if detail is None:
+            raise EnrichmentNotFoundError("No phone enrichment found for this import")
         return detail
 
     async def _persist_provider_result(
