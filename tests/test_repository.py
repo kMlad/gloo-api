@@ -177,6 +177,14 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
                 )
             ],
             "heyreach_conversations": [SimpleNamespace(data=[])],
+            "speed_to_lead_events": [
+                SimpleNamespace(
+                    data=[
+                        {"lead_id": "lead-1", "replied_at": "2026-09-01T10:00:00Z"},
+                        {"lead_id": "lead-1", "replied_at": "2026-09-05T10:00:00Z"},
+                    ]
+                )
+            ],
         }
     )
 
@@ -193,6 +201,7 @@ async def test_lead_reply_type_filter_precedes_pagination_and_counts_all_types()
     assert items[0]["positive_conversation_count"] == 1
     assert items[0]["ooo_conversation_count"] == 1
     assert items[0]["latest_reply_at"] == "2026-08-03T10:00:00Z"
+    assert items[0]["speed_to_lead_at"] == "2026-09-05T10:00:00Z"
     assert "smartlead_conversations" not in items[0]
     lead_calls = [call for call in database.calls if call[0] == "leads"]
     assert lead_calls[0][1:] == (
@@ -273,6 +282,7 @@ async def test_heyreach_campaign_filter_joins_conversations() -> None:
                     ]
                 )
             ],
+            "speed_to_lead_events": [SimpleNamespace(data=[])],
         }
     )
 
@@ -287,6 +297,7 @@ async def test_heyreach_campaign_filter_joins_conversations() -> None:
     assert items[0]["latest_reply_at"] == "2026-09-01T12:00:00Z"
     assert items[0]["source_campaigns"][0]["heyreach_campaign_id"] == 10
     assert items[0]["source_campaigns"][0]["name"] == "Outbound"
+    assert items[0]["speed_to_lead_at"] is None
     lead_calls = [call for call in database.calls if call[0] == "leads"]
     assert lead_calls[0][1:] == (
         "select",
@@ -752,3 +763,71 @@ async def test_campaign_import_stats_return_latest_run_per_reply_type() -> None:
         database.calls
     )
 
+
+
+@pytest.mark.asyncio
+async def test_speed_to_lead_list_events_filters_on_lead_status_and_owner() -> None:
+    from app.speed_to_lead.repository import SpeedToLeadRepository
+
+    database = DatabaseStub(
+        {
+            "speed_to_lead_events": [
+                SimpleNamespace(
+                    data=[
+                        {
+                            "id": "event-1",
+                            "lead_id": "lead-1",
+                            "leads": {"id": "lead-1", "status": "new"},
+                        }
+                    ],
+                    count=7,
+                )
+            ]
+        }
+    )
+
+    events, total = await SpeedToLeadRepository(database).list_events(
+        limit=10, offset=20, visible_to_sdr_id="sdr-1"
+    )
+
+    assert total == 7
+    assert events[0]["lead"] == {"id": "lead-1", "status": "new"}
+    assert "leads" not in events[0]
+    assert database.calls[0][1:] == (
+        "select",
+        ("*,leads!inner(*)",),
+        {"count": "exact"},
+    )
+    assert ("speed_to_lead_events", "eq", ("leads.status", "new"), {}) in (
+        database.calls
+    )
+    assert (
+        "speed_to_lead_events",
+        "eq",
+        ("leads.assigned_sdr_id", "sdr-1"),
+        {},
+    ) in database.calls
+    assert (
+        "speed_to_lead_events",
+        "order",
+        ("replied_at",),
+        {"desc": True},
+    ) in database.calls
+    assert ("speed_to_lead_events", "range", (20, 29), {}) in database.calls
+
+
+@pytest.mark.asyncio
+async def test_speed_to_lead_list_events_can_include_handled() -> None:
+    from app.speed_to_lead.repository import SpeedToLeadRepository
+
+    database = DatabaseStub(
+        {"speed_to_lead_events": [SimpleNamespace(data=[], count=0)]}
+    )
+
+    await SpeedToLeadRepository(database).list_events(
+        limit=10, offset=0, include_handled=True
+    )
+
+    assert not any(
+        call[1] == "eq" and call[2][0] == "leads.status" for call in database.calls
+    )

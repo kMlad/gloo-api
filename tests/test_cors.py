@@ -32,6 +32,9 @@ def test_env_accepts_comma_separated_cors_origins() -> None:
         fullenrich_webhook_token=SecretStr(
             "test-fullenrich-webhook-token-32-characters"
         ),
+        smartlead_webhook_token=SecretStr(
+            "test-smartlead-webhook-token-32-characters"
+        ),
         cors_allowed_origins="http://localhost:5173,http://127.0.0.1:5173",
     )
     assert env.cors_allowed_origins == [

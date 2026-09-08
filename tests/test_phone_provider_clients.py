@@ -194,3 +194,85 @@ async def test_successful_invalid_json_is_reported_safely() -> None:
     assert result.status == "failed"
     assert result.error_code == "invalid_json"
     assert "secret" not in result.error_message
+
+
+@pytest.mark.asyncio
+async def test_prospeo_insufficient_credits_is_normalised_and_not_retried() -> None:
+    request_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            400, json={"error": True, "error_code": "INSUFFICIENT_CREDITS"}
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://api.prospeo.io/", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        result = await ProspeoClient(
+            http_client, "secret", max_retries=2, concurrency=1
+        ).find_phone({"email": "pat@example.com"}, "attempt-credits")
+
+    assert result.status == "failed"
+    assert result.error_code == "insufficient_credits"
+    assert result.error_message == "Provider account has insufficient credits"
+    assert request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_airscale_insufficient_credits_is_normalised() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403, json={"error": "Forbidden", "message": "Insufficient credits"}
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://api.airscale.io/", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        result = await AirScaleClient(
+            http_client, "secret", max_retries=1, concurrency=1
+        ).find_phone(
+            {"linkedin_profile": "https://www.linkedin.com/in/pat"}, "attempt-1"
+        )
+
+    assert result.status == "failed"
+    assert result.error_code == "insufficient_credits"
+    assert result.http_status == 403
+
+
+@pytest.mark.asyncio
+async def test_payment_required_status_counts_as_insufficient_credits() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(402, json={"message": "Payment required"})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.leadmagic.io/", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        result = await LeadMagicClient(
+            http_client, "secret", max_retries=1, concurrency=1
+        ).find_phone({"email": "pat@example.com"}, "attempt-402")
+
+    assert result.status == "failed"
+    assert result.error_code == "insufficient_credits"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_is_never_mistaken_for_credits() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, headers={"Retry-After": "0"}, json={"message": "credit rate limit"}
+        )
+
+    async def sleeper(delay: float) -> None:
+        return None
+
+    async with httpx.AsyncClient(
+        base_url="https://api.leadmagic.io/", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        result = await LeadMagicClient(
+            http_client, "secret", max_retries=0, concurrency=1, sleeper=sleeper
+        ).find_phone({"email": "pat@example.com"}, "attempt-429")
+
+    assert result.status == "rate_limited"
+    assert result.error_code != "insufficient_credits"

@@ -5,6 +5,7 @@ from app.heyreach.repository import HeyReachRepository
 from app.phone_enrichment.service import PhoneEnrichmentService
 from app.repositories import Repository
 from app.smartlead.client import SmartLeadClient
+from app.speed_to_lead.service import SpeedToLeadService
 from app.tables.service import TableService
 
 
@@ -34,3 +35,7 @@ async def get_phone_enrichment_service(request: Request) -> PhoneEnrichmentServi
 
 async def get_table_service(request: Request) -> TableService:
     return request.app.state.table_service
+
+
+async def get_speed_to_lead_service(request: Request) -> SpeedToLeadService:
+    return request.app.state.speed_to_lead

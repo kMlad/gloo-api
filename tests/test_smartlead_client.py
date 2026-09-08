@@ -194,3 +194,112 @@ async def test_lead_message_history_accepts_data_wrapper() -> None:
         messages = await client.get_lead_message_history(campaign_id=10, lead_id="99")
 
     assert messages == [{"id": "msg-3", "direction": "outbound"}]
+
+
+@pytest.mark.asyncio
+async def test_save_webhook_posts_campaign_webhook_and_returns_id() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "data": {"id": 555}})
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        saved = await SmartLeadClient(http_client, "secret", max_retries=0).save_webhook(
+            10,
+            name="Gloo speed to lead",
+            webhook_url="https://api.example.com/hook",
+            event_types=["LEAD_CATEGORY_UPDATED"],
+            categories=["Interested"],
+        )
+
+    assert captured["method"] == "POST"
+    assert captured["url"].path == "/api/v1/campaigns/10/webhooks"
+    assert captured["url"].params["api_key"] == "secret"
+    assert captured["body"] == {
+        "id": None,
+        "name": "Gloo speed to lead",
+        "webhook_url": "https://api.example.com/hook",
+        "event_types": ["LEAD_CATEGORY_UPDATED"],
+        "categories": ["Interested"],
+    }
+    assert saved["id"] == "555"
+
+
+@pytest.mark.asyncio
+async def test_save_webhook_falls_back_to_listing_when_no_id_returned() -> None:
+    bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": 1, "webhook_url": "https://other.example/hook"},
+                    {"id": 2, "webhook_url": "https://api.example.com/hook"},
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        saved = await SmartLeadClient(http_client, "secret", max_retries=0).save_webhook(
+            10,
+            name="Gloo speed to lead",
+            webhook_url="https://api.example.com/hook",
+            event_types=["LEAD_CATEGORY_UPDATED"],
+            webhook_id="2",
+        )
+
+    assert bodies[0]["id"] == 2
+    assert saved["id"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_delete_webhook_sends_id_in_body() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        await SmartLeadClient(http_client, "secret", max_retries=0).delete_webhook(
+            10, "555"
+        )
+
+    assert captured["method"] == "DELETE"
+    assert captured["url"].path == "/api/v1/campaigns/10/webhooks"
+    assert captured["body"] == {"id": 555}
+
+
+@pytest.mark.asyncio
+async def test_list_webhooks_unwraps_data() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/campaigns/10/webhooks"
+        return httpx.Response(200, json={"data": [{"id": 1, "event_types": []}]})
+
+    async with httpx.AsyncClient(
+        base_url="https://server.smartlead.ai/api/v1/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        webhooks = await SmartLeadClient(
+            http_client, "secret", max_retries=0
+        ).list_webhooks(10)
+
+    assert webhooks == [{"id": 1, "event_types": []}]

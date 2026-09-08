@@ -40,6 +40,11 @@ class Env(BaseSettings):
     internal_api_token: SecretStr = Field(min_length=32)
     public_api_base_url: str
     fullenrich_webhook_token: SecretStr = Field(min_length=32)
+    smartlead_webhook_token: SecretStr = Field(min_length=32)
+    smartlead_webhook_event_type: str = "LEAD_CATEGORY_UPDATED"
+    slack_bot_token: SecretStr | None = None
+    slack_channel_id: str | None = None
+    app_base_url: str | None = None
     cors_allowed_origins: CorsAllowedOrigins = Field(default_factory=list)
     invite_redirect_url: str | None = None
     smartlead_base_url: str = "https://server.smartlead.ai/api/v1"
@@ -74,11 +79,19 @@ class Env(BaseSettings):
     email_enrichment_fullenrich_poll_seconds: float = Field(default=90.0, gt=0)
     email_provider_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    @field_validator("slack_channel_id", "app_base_url", mode="before")
+    @classmethod
+    def empty_optional_string(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator(
         "perplexity_api_key",
         "icypeas_api_key",
         "kitt_api_key",
         "millionverifier_api_key",
+        "slack_bot_token",
         mode="before",
     )
     @classmethod

@@ -145,3 +145,22 @@ require_lead_user = require_app_roles("admin", "sales_lead", "sdr")
 require_internal_or_admin_or_sales_lead = require_internal_token_or_app_roles(
     *ADMIN_OR_SALES_LEAD_ROLES
 )
+
+
+async def validate_active_sdr(supabase: AsyncClient, sdr_id: str) -> None:
+    """Raise 422 unless ``sdr_id`` belongs to an active user with the SDR role."""
+    invalid = HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="Target user is not an active SDR",
+    )
+    try:
+        response = await supabase.auth.admin.get_user_by_id(str(sdr_id))
+    except AuthApiError as error:
+        raise invalid from error
+    user = response.user
+    if (
+        parse_app_role(user.app_metadata) != "sdr"
+        or user.deleted_at is not None
+        or user.banned_until is not None
+    ):
+        raise invalid

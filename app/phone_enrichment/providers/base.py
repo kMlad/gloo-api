@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -23,6 +24,16 @@ _AUDIT_HEADERS = {
     "x-minute-reset-seconds",
     "x-request-id",
 }
+
+INSUFFICIENT_CREDITS = "insufficient_credits"
+PROVIDER_LABELS = {
+    "smartlead_signature": "email signature",
+    "leadmagic": "LeadMagic",
+    "prospeo": "Prospeo",
+    "airscale": "AirScale",
+    "fullenrich": "FullEnrich",
+}
+_CREDIT_ERROR = re.compile(r"credit", re.IGNORECASE)
 
 
 class FixedWindowRateLimiter:
@@ -176,6 +187,13 @@ class BaseProviderClient:
                     continue
 
                 error_code, error_message = self._safe_error(payload)
+                if response.status_code >= 400 and self._is_insufficient_credits(
+                    response.status_code, error_code, error_message
+                ):
+                    # Prospeo: 400 INSUFFICIENT_CREDITS; AirScale: 403 "Insufficient
+                    # credits". Normalise so callers can surface a top-up warning.
+                    error_code = INSUFFICIENT_CREDITS
+                    error_message = "Provider account has insufficient credits"
                 if response.status_code >= 400:
                     return ProviderResult(
                         status="rate_limited"
@@ -204,6 +222,16 @@ class BaseProviderClient:
             error_code="request_error",
             error_message="Provider request failed",
         )
+
+    @staticmethod
+    def _is_insufficient_credits(
+        status_code: int, error_code: str | None, error_message: str
+    ) -> bool:
+        if status_code == 429:
+            return False
+        if status_code == 402:
+            return True
+        return bool(_CREDIT_ERROR.search(f"{error_code or ''} {error_message}"))
 
     @staticmethod
     def _retry_delay(response: httpx.Response, attempt: int) -> float:

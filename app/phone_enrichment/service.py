@@ -2,6 +2,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,7 +12,11 @@ from postgrest.exceptions import APIError
 
 from app.phone_enrichment.parser import extract_phone_from_replies, normalize_phone
 from app.phone_enrichment.providers.airscale import AirScaleClient
-from app.phone_enrichment.providers.base import ProviderResult
+from app.phone_enrichment.providers.base import (
+    INSUFFICIENT_CREDITS,
+    PROVIDER_LABELS,
+    ProviderResult,
+)
 from app.phone_enrichment.providers.fullenrich import FullEnrichClient
 from app.phone_enrichment.providers.leadmagic import LeadMagicClient
 from app.phone_enrichment.providers.linkedin import person_linkedin_url
@@ -20,6 +27,33 @@ from app.phone_enrichment.repository import (
 )
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
 from app.utils import to_iso, utc_now
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PhoneEnrichedEvent:
+    run_id: str
+    lead_id: str
+    phone: str
+    source: str
+
+
+PhoneEnrichedListener = Callable[[PhoneEnrichedEvent], Awaitable[None]]
+RunFinishedListener = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def describe_provider_failure(
+    status: str | None, error_code: str | None, error_message: str | None
+) -> str:
+    """Short human-readable reason for a non-conclusive provider attempt."""
+    if error_code == INSUFFICIENT_CREDITS:
+        return "insufficient credits"
+    if status == "rate_limited":
+        return "rate limited"
+    if status == "timed_out":
+        return "timed out"
+    return (error_message or "failed").strip()
 
 
 class EnrichmentConflictError(Exception):
@@ -69,6 +103,16 @@ class PhoneEnrichmentService:
             + "/api/v1/phone-enrichments/webhooks/fullenrich/"
             + fullenrich_webhook_token
         )
+        self._phone_listeners: list[PhoneEnrichedListener] = []
+        self._run_listeners: list[RunFinishedListener] = []
+
+    def add_phone_enriched_listener(self, listener: PhoneEnrichedListener) -> None:
+        """Register a coroutine called after a lead receives a new phone number."""
+        self._phone_listeners.append(listener)
+
+    def add_run_finished_listener(self, listener: RunFinishedListener) -> None:
+        """Register a coroutine called with the run detail once a run is terminal."""
+        self._run_listeners.append(listener)
 
     async def start(
         self,
@@ -208,6 +252,7 @@ class PhoneEnrichmentService:
                     "completed_at": now,
                 },
             )
+            await self._emit_run_finished(run_id)
 
     async def execute(self, run_id: str) -> dict[str, Any]:
         detail = await self._repository.get_run_detail(run_id)
@@ -312,7 +357,7 @@ class PhoneEnrichmentService:
                     },
                 )
                 await self._complete_with_phone(
-                    item_id, lead_id, phone, "smartlead_signature"
+                    item_id, lead_id, phone, "smartlead_signature", run_id=run_id
                 )
                 return None
             await self._repository.update_attempt(
@@ -330,6 +375,7 @@ class PhoneEnrichmentService:
                 ("airscale", 4, self._airscale),
             ]
             had_error = False
+            provider_errors: list[str] = []
             for provider_name, sequence, client in providers:
                 attempt = await self._repository.create_attempt(
                     run_id=run_id,
@@ -350,11 +396,22 @@ class PhoneEnrichmentService:
                 )
                 if normalized is not None and result.status == "found":
                     await self._complete_with_phone(
-                        item_id, lead_id, normalized, provider_name
+                        item_id, lead_id, normalized, provider_name, run_id=run_id
                     )
                     return None
                 if result.status in {"failed", "rate_limited", "timed_out"}:
                     had_error = True
+                    reason = describe_provider_failure(
+                        result.status, result.error_code, result.error_message
+                    )
+                    provider_errors.append(
+                        f"{PROVIDER_LABELS.get(provider_name, provider_name)}: {reason}"
+                    )
+                    if result.error_code == INSUFFICIENT_CREDITS:
+                        logger.warning(
+                            "Phone provider has insufficient credits",
+                            extra={"provider": provider_name, "run_id": run_id},
+                        )
                     await self._repository.update_item(
                         item_id, {"had_provider_error": True}
                     )
@@ -376,7 +433,9 @@ class PhoneEnrichmentService:
                     str(fullenrich_attempt["id"]),
                     {"completed_at": to_iso(utc_now())},
                 )
-                await self._complete_without_phone(item_id, had_error)
+                await self._complete_without_phone(
+                    item_id, had_error, errors=provider_errors
+                )
                 return None
             return item, fullenrich_attempt, fullenrich_input
         except Exception:  # noqa: BLE001 - isolate one enrichment item
@@ -500,7 +559,11 @@ class PhoneEnrichmentService:
                     },
                 )
                 await self._complete_with_phone(
-                    item_id, str(attempt["lead_id"]), phone, "fullenrich"
+                    item_id,
+                    str(attempt["lead_id"]),
+                    phone,
+                    "fullenrich",
+                    run_id=str(attempt["run_id"]),
                 )
             else:
                 await self._repository.update_attempt(
@@ -649,7 +712,13 @@ class PhoneEnrichmentService:
         )
 
     async def _complete_with_phone(
-        self, item_id: str, lead_id: str, phone: str, source: str
+        self,
+        item_id: str,
+        lead_id: str,
+        phone: str,
+        source: str,
+        *,
+        run_id: str | None = None,
     ) -> None:
         updated = await self._repository.update_empty_lead_phone(lead_id, phone, source)
         await self._repository.update_item(
@@ -661,20 +730,50 @@ class PhoneEnrichmentService:
                 "completed_at": to_iso(utc_now()),
             },
         )
+        if not updated or run_id is None:
+            return
+        event = PhoneEnrichedEvent(
+            run_id=run_id, lead_id=lead_id, phone=phone, source=source
+        )
+        for listener in self._phone_listeners:
+            try:
+                await listener(event)
+            except Exception:
+                logger.exception(
+                    "Phone enrichment listener failed",
+                    extra={"run_id": run_id, "lead_id": lead_id},
+                )
 
-    async def _complete_without_phone(self, item_id: str, had_error: bool) -> None:
+    async def _complete_without_phone(
+        self, item_id: str, had_error: bool, *, errors: list[str] | None = None
+    ) -> None:
+        message: str | None = None
+        if had_error:
+            message = "One or more providers failed; no phone result is conclusive"
+            if errors:
+                message = "No conclusive phone result. " + "; ".join(errors)
         await self._repository.update_item(
             item_id,
             {
                 "status": "failed" if had_error else "not_found",
-                "error_message": (
-                    "One or more providers failed; no phone result is conclusive"
-                    if had_error
-                    else None
-                ),
+                "error_message": message,
                 "completed_at": to_iso(utc_now()),
             },
         )
+
+    async def _emit_run_finished(self, run_id: str) -> None:
+        if not self._run_listeners:
+            return
+        detail = await self._repository.get_run_detail(run_id)
+        if detail is None:
+            return
+        for listener in self._run_listeners:
+            try:
+                await listener(detail)
+            except Exception:
+                logger.exception(
+                    "Phone enrichment run listener failed", extra={"run_id": run_id}
+                )
 
     async def _finalize_run(self, run_id: str) -> None:
         items = await self._repository.list_items(run_id)
@@ -728,6 +827,8 @@ class PhoneEnrichmentService:
         if not active:
             values["completed_at"] = to_iso(utc_now())
         await self._repository.update_run(run_id, values)
+        if not active:
+            await self._emit_run_finished(run_id)
 
     @staticmethod
     def _fullenrich_input(

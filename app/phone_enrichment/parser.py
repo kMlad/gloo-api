@@ -17,6 +17,16 @@ _QUOTED_HISTORY = [
     re.compile(r"^\s*-{2,}\s*Forwarded message\s*-{2,}\s*$", re.IGNORECASE),
     re.compile(r"^\s*_{5,}\s*$"),
 ]
+_WRAPPED_ATTRIBUTION_START = re.compile(
+    r"^\s*On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|\d)", re.IGNORECASE
+)
+# Gmail's exact attribution shape ("On Mon, Sep 7, 2026 at 9:13 PM Name"). Unambiguous
+# enough to cut on even when the "wrote:" tail was truncated away by SmartLead.
+_GMAIL_ATTRIBUTION = re.compile(
+    r"^\s*On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}"
+    r"(?:\s+at\s+\d{1,2}:\d{2})?",
+    re.IGNORECASE,
+)
 
 
 class _ReplyHTMLParser(HTMLParser):
@@ -68,6 +78,15 @@ def reply_to_text(body: str) -> str:
     kept: list[str] = []
     for index, line in enumerate(lines):
         if any(pattern.match(line) for pattern in _QUOTED_HISTORY):
+            break
+        if _GMAIL_ATTRIBUTION.match(line):
+            break
+        if _WRAPPED_ATTRIBUTION_START.match(line) and re.search(
+            r"\bwrote:\s*$",
+            "\n".join(lines[index : index + 3]),
+            re.IGNORECASE | re.MULTILINE,
+        ):
+            # Gmail wraps long attributions: "On Mon, ... Name\n<addr> wrote:".
             break
         if line.lstrip().startswith(">"):
             break

@@ -723,6 +723,13 @@ class Repository:
         if not leads:
             return [], response.count or 0
 
+        await self.decorate_leads(leads)
+        return leads, response.count or len(leads)
+
+    async def decorate_leads(self, leads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach conversation counts, latest reply, sources, and speed-to-lead time."""
+        if not leads:
+            return leads
         lead_ids = [lead["id"] for lead in leads]
         conversations_response = await (
             self._db.table("smartlead_conversations")
@@ -858,7 +865,21 @@ class Repository:
                     and item.get("qualified_at") is not None
                 ],
             ]
-        return leads, response.count or len(leads)
+        speed_to_lead_response = await (
+            self._db.table("speed_to_lead_events")
+            .select("lead_id,replied_at")
+            .in_("lead_id", lead_ids)
+            .execute()
+        )
+        speed_to_lead_by_lead: dict[str, str] = {}
+        for event in speed_to_lead_response.data:
+            lead_id = str(event["lead_id"])
+            current = speed_to_lead_by_lead.get(lead_id)
+            if current is None or str(event["replied_at"]) > current:
+                speed_to_lead_by_lead[lead_id] = str(event["replied_at"])
+        for lead in leads:
+            lead["speed_to_lead_at"] = speed_to_lead_by_lead.get(str(lead["id"]))
+        return leads
 
     async def update_lead(
         self,

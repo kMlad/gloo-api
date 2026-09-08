@@ -32,6 +32,9 @@ def _env(**overrides: Any) -> Env:
         "fullenrich_webhook_token": SecretStr(
             "test-fullenrich-webhook-token-32-characters"
         ),
+        "smartlead_webhook_token": SecretStr(
+            "test-smartlead-webhook-token-32-characters"
+        ),
     }
     values.update(overrides)
     return Env(**values)

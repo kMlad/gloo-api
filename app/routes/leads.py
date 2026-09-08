@@ -17,9 +17,9 @@ from pydantic import ValidationError
 
 from app.auth import (
     AuthenticatedUser,
-    parse_app_role,
     require_admin_or_sales_lead,
     require_lead_user,
+    validate_active_sdr,
 )
 from app.dependencies import (
     get_optional_heyreach_client,
@@ -54,7 +54,7 @@ from app.services import LeadService
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
 from app.tables.csv_import import CsvImportError
-from supabase import AsyncClient, AuthApiError
+from supabase import AsyncClient
 
 router = APIRouter(
     prefix="/api/v1/leads",
@@ -73,26 +73,6 @@ ManagerDependency = Annotated[
     AuthenticatedUser, Depends(require_admin_or_sales_lead)
 ]
 SupabaseDependency = Annotated[AsyncClient, Depends(get_supabase)]
-
-
-async def _validate_sdr(supabase: AsyncClient, sdr_id: UUID) -> None:
-    try:
-        response = await supabase.auth.admin.get_user_by_id(str(sdr_id))
-    except AuthApiError as error:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Target user is not an active SDR",
-        ) from error
-    user = response.user
-    if (
-        parse_app_role(user.app_metadata) != "sdr"
-        or user.deleted_at is not None
-        or user.banned_until is not None
-    ):
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Target user is not an active SDR",
-        )
 
 
 @router.get("", response_model=LeadListResponse)
@@ -159,7 +139,7 @@ async def assign_leads(
     actor: ManagerDependency,
     supabase: SupabaseDependency,
 ) -> dict:
-    await _validate_sdr(supabase, payload.sdr_id)
+    await validate_active_sdr(supabase, str(payload.sdr_id))
     requested_ids = [str(lead_id) for lead_id in payload.lead_ids]
     assigned_ids = await repository.assign_leads(
         requested_ids,
@@ -266,7 +246,7 @@ async def replace_lead_assignment(
     actor: ManagerDependency,
     supabase: SupabaseDependency,
 ) -> dict:
-    await _validate_sdr(supabase, payload.sdr_id)
+    await validate_active_sdr(supabase, str(payload.sdr_id))
     assignment = await repository.set_lead_assignment(
         str(lead_id), sdr_id=str(payload.sdr_id), assigned_by=actor.id
     )

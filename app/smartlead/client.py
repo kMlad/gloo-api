@@ -210,3 +210,60 @@ class SmartLeadClient:
         if not isinstance(messages, list):
             raise SmartLeadError("SmartLead returned invalid lead message history")
         return [item for item in messages if isinstance(item, dict)]
+
+    async def list_webhooks(self, campaign_id: int) -> list[dict[str, Any]]:
+        payload = await self._request("GET", f"/campaigns/{campaign_id}/webhooks")
+        if isinstance(payload, dict):
+            payload = payload.get("data", payload.get("webhooks", []))
+        if not isinstance(payload, list):
+            raise SmartLeadError("SmartLead returned an invalid webhook list")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def save_webhook(
+        self,
+        campaign_id: int,
+        *,
+        name: str,
+        webhook_url: str,
+        event_types: list[str],
+        categories: list[str] | None = None,
+        webhook_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a campaign webhook and return a record with its id."""
+        payload = await self._request(
+            "POST",
+            f"/campaigns/{campaign_id}/webhooks",
+            json={
+                "id": int(webhook_id) if _is_int(webhook_id) else webhook_id,
+                "name": name,
+                "webhook_url": webhook_url,
+                "event_types": event_types,
+                "categories": categories or [],
+            },
+        )
+        record = payload.get("data", payload) if isinstance(payload, dict) else {}
+        if not isinstance(record, dict):
+            record = {}
+        identifier = record.get("id") or record.get("webhook_id")
+        if identifier is None and isinstance(payload, dict):
+            identifier = payload.get("id") or payload.get("webhook_id")
+        if identifier is None:
+            for existing in await self.list_webhooks(campaign_id):
+                if str(existing.get("webhook_url") or "") == webhook_url:
+                    identifier = existing.get("id")
+                    record = {**existing, **record}
+                    break
+        if identifier is None:
+            raise SmartLeadError("SmartLead did not return a webhook id")
+        return {**record, "id": str(identifier)}
+
+    async def delete_webhook(self, campaign_id: int, webhook_id: str) -> None:
+        await self._request(
+            "DELETE",
+            f"/campaigns/{campaign_id}/webhooks",
+            json={"id": int(webhook_id) if _is_int(webhook_id) else webhook_id},
+        )
+
+
+def _is_int(value: str | None) -> bool:
+    return value is not None and value.strip().lstrip("-").isdigit()

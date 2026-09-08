@@ -491,3 +491,169 @@ async def test_latest_enrichment_can_be_looked_up_by_import_run() -> None:
     assert latest["source_import_run_id"] == import_run_id
     with pytest.raises(EnrichmentNotFoundError):
         await service.get_latest_for_import(str(uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_phone_listeners_receive_run_scoped_event_and_cannot_break_run() -> (
+    None
+):
+    lead_id = str(uuid4())
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "enriched_phone_number": None,
+            "phone_source": None,
+            "inbound_replies": [],
+        }
+    )
+    calls: list[str] = []
+    no_result = ProviderResult(status="not_found", request_payload={})
+    service = _service(
+        repository,
+        calls,
+        no_result,
+        ProviderResult(status="found", request_payload={}, phone="+44 20 7946 0958"),
+        no_result,
+    )
+    received = []
+
+    async def listener(event):
+        received.append(event)
+
+    async def broken(event):
+        raise RuntimeError("listener exploded")
+
+    service.add_phone_enriched_listener(broken)
+    service.add_phone_enriched_listener(listener)
+
+    result = await service.run(PhoneEnrichmentRequest(lead_ids=[lead_id]), "key-1")
+
+    assert result["status"] == "succeeded"
+    assert len(received) == 1
+    assert received[0].run_id == result["id"]
+    assert received[0].lead_id == lead_id
+    assert received[0].phone == "+442079460958"
+    assert received[0].source == "prospeo"
+
+
+@pytest.mark.asyncio
+async def test_phone_listener_is_not_called_when_lead_already_had_phone() -> None:
+    lead_id = str(uuid4())
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "enriched_phone_number": None,
+            "phone_source": None,
+            "inbound_replies": [],
+        }
+    )
+    calls: list[str] = []
+    service = _service(
+        repository,
+        calls,
+        ProviderResult(status="found", request_payload={}, phone="+44 20 7946 0958"),
+        ProviderResult(status="not_found", request_payload={}),
+        ProviderResult(status="not_found", request_payload={}),
+    )
+    received = []
+
+    async def listener(event):
+        received.append(event)
+
+    service.add_phone_enriched_listener(listener)
+    # Simulate a concurrent writer filling the phone before completion.
+    repository.lead["enriched_phone_number"] = "+15550000000"
+
+    await service.run(PhoneEnrichmentRequest(lead_ids=[lead_id]), "key-2")
+
+    assert received == []
+
+
+@pytest.mark.asyncio
+async def test_run_finished_listener_receives_detail_once_with_credit_errors() -> (
+    None
+):
+    lead_id = str(uuid4())
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "first_name": "Pat",
+            "enriched_phone_number": None,
+            "phone_source": None,
+            "inbound_replies": [],
+        }
+    )
+    calls: list[str] = []
+    credits = ProviderResult(
+        status="failed",
+        request_payload={},
+        http_status=400,
+        error_code="insufficient_credits",
+        error_message="Provider account has insufficient credits",
+    )
+    service = _service(
+        repository,
+        calls,
+        ProviderResult(status="not_found", request_payload={}),
+        credits,
+        ProviderResult(status="skipped_no_input", request_payload={}),
+    )
+    finished = []
+
+    async def broken(detail):
+        raise RuntimeError("listener exploded")
+
+    async def listener(detail):
+        finished.append(detail)
+
+    service.add_run_finished_listener(broken)
+    service.add_run_finished_listener(listener)
+
+    result = await service.run(PhoneEnrichmentRequest(lead_ids=[lead_id]), "key-3")
+
+    assert result["status"] == "failed"
+    assert len(finished) == 1
+    detail = finished[0]
+    assert detail["id"] == result["id"]
+    assert detail["status"] == "failed"
+    item = detail["items"][0]
+    assert item["status"] == "failed"
+    assert item["error_message"] == (
+        "No conclusive phone result. Prospeo: insufficient credits"
+    )
+    assert result["errors"][0]["message"] == item["error_message"]
+    prospeo = next(a for a in item["attempts"] if a["provider"] == "prospeo")
+    assert prospeo["error_code"] == "insufficient_credits"
+
+
+@pytest.mark.asyncio
+async def test_run_finished_listener_fires_when_nothing_is_queued() -> None:
+    lead_id = str(uuid4())
+    repository = FakeEnrichmentRepository(
+        {
+            "id": lead_id,
+            "email": "pat@example.com",
+            "enriched_phone_number": "+15550000000",
+            "phone_source": "prospeo",
+            "inbound_replies": [],
+        }
+    )
+    calls: list[str] = []
+    no_result = ProviderResult(status="not_found", request_payload={})
+    service = _service(repository, calls, no_result, no_result, no_result)
+    finished = []
+
+    async def listener(detail):
+        finished.append(detail)
+
+    service.add_run_finished_listener(listener)
+
+    run = await service.start(PhoneEnrichmentRequest(lead_ids=[lead_id]), "key-4")
+
+    assert run["status"] == "succeeded"
+    assert calls == []
+    assert len(finished) == 1
+    assert finished[0]["items"][0]["status"] == "skipped_existing"

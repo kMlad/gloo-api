@@ -56,3 +56,38 @@ def test_plain_text_outlook_and_prefixed_quotes_are_removed() -> None:
     prefixed = "Reply only\n> Old signature +44 20 7946 0958"
     assert "+1 415" not in reply_to_text(outlook)
     assert "+44 20" not in reply_to_text(prefixed)
+
+
+def test_reply_to_text_drops_wrapped_gmail_attribution() -> None:
+    body = (
+        "Sure, call me on +1 415 555 2671\n"
+        "Best,\n"
+        "Pat\n"
+        "\n"
+        "On Mon, Sep 7, 2026 at 9:13 PM Bisera Loteska\n"
+        "<bisera@example.com> wrote:\n"
+        "> Hi Pat, my number is +44 20 7946 0958\n"
+    )
+
+    text = reply_to_text(body)
+
+    assert "Sure, call me on +1 415 555 2671" in text
+    assert "wrote:" not in text
+    assert "7946" not in text
+
+
+def test_reply_to_text_keeps_ordinary_sentences_starting_with_on() -> None:
+    body = "On Monday we can talk.\nOn balance I am interested.\nBest, Pat"
+
+    assert reply_to_text(body) == body
+
+
+def test_reply_to_text_drops_truncated_gmail_attribution() -> None:
+    # SmartLead's message-history API returns a truncated plain-text preview that
+    # can end before "wrote:".
+    body = (
+        "Best,\xa0\n\nKiril\n\nOn Mon, Sep 7, 2026 at 9:13 PM Bisera Loteska\n"
+        "<bisera@example.com [bisera@example.com]"
+    )
+
+    assert reply_to_text(body) == "Best,\xa0\n\nKiril\n"

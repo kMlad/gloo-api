@@ -462,6 +462,9 @@ def _env(*, internal_token: str = "test-internal-token-with-32-characters") -> E
         fullenrich_webhook_token=SecretStr(
             "test-fullenrich-webhook-token-32-characters"
         ),
+        smartlead_webhook_token=SecretStr(
+            "test-smartlead-webhook-token-32-characters"
+        ),
     )
 
 

@@ -453,3 +453,40 @@ def test_heyreach_auto_tag_migration_is_additive_and_constrained() -> None:
     assert "auto_tag = coalesce(" in migration
     assert "drop column" not in migration
 
+
+
+def test_speed_to_lead_migration_is_constrained_and_private() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_speed_to_lead.sql")
+    ).read_text()
+
+    assert "add column speed_to_lead_enabled boolean not null default false" in (
+        migration
+    )
+    assert "add column speed_to_lead_sdr_id uuid references auth.users(id)" in (
+        migration
+    )
+    assert "add column smartlead_webhook_id text" in migration
+    assert "not speed_to_lead_enabled or speed_to_lead_sdr_id is not null" in (
+        migration
+    )
+    assert "create table public.speed_to_lead_events" in migration
+    assert "platform in ('smartlead', 'heyreach')" in migration
+    assert "dedupe_key text not null unique" in migration
+    assert "references public.phone_enrichment_runs(id) on delete set null" in (
+        migration
+    )
+    assert "alter table public.speed_to_lead_events enable row level security" in (
+        migration
+    )
+    assert (
+        "revoke all on table public.speed_to_lead_events from public, anon, authenticated"
+        in migration
+    )
+    assert (
+        "grant select, insert, update, delete on table public.speed_to_lead_events\n"
+        "    to service_role"
+    ) in migration
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration
+    assert "drop column" not in migration

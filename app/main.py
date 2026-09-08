@@ -10,6 +10,7 @@ from starlette.types import ASGIApp
 from app.env import get_env, load_cors_allowed_origins
 from app.heyreach.client import HeyReachClient
 from app.heyreach.repository import HeyReachRepository
+from app.notifications.slack import SlackClient
 from app.phone_enrichment.providers import (
     AirScaleClient,
     FullEnrichClient,
@@ -31,6 +32,11 @@ from app.routes.leads import router as leads_router
 from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
+from app.speed_to_lead.notifications import SpeedToLeadNotifier
+from app.speed_to_lead.repository import SpeedToLeadRepository
+from app.speed_to_lead.routes import list_router as speed_to_lead_list_router
+from app.speed_to_lead.routes import router as speed_to_lead_router
+from app.speed_to_lead.service import SpeedToLeadService
 from app.supabase_client import get_supabase
 from app.tables.email_enrichment import (
     FullEnrichEmailClient,
@@ -251,6 +257,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         concurrency=env.phone_enrichment_concurrency,
         reconcile_seconds=env.phone_enrichment_reconcile_seconds,
     )
+    slack_http = None
+    slack_client = None
+    if env.slack_bot_token is not None and env.slack_channel_id is not None:
+        slack_http = httpx.AsyncClient(
+            base_url="https://slack.com/api/",
+            timeout=httpx.Timeout(10.0),
+            headers={"Accept": "application/json"},
+        )
+        slack_client = SlackClient(
+            slack_http, env.slack_bot_token.get_secret_value()
+        )
+    app.state.speed_to_lead = SpeedToLeadService(
+        SpeedToLeadRepository(supabase),
+        app.state.repository,
+        app.state.smartlead,
+        app.state.phone_enrichment,
+        webhook_url=(
+            env.public_api_base_url.rstrip("/")
+            + "/api/v1/smartlead/webhooks/"
+            + env.smartlead_webhook_token.get_secret_value()
+        ),
+        event_type=env.smartlead_webhook_event_type,
+        notifier=SpeedToLeadNotifier(
+            slack_client,
+            channel_id=env.slack_channel_id,
+            app_base_url=env.app_base_url,
+        ),
+    )
+    app.state.phone_enrichment.add_phone_enriched_listener(
+        app.state.speed_to_lead.handle_phone_enriched
+    )
+    app.state.phone_enrichment.add_run_finished_listener(
+        app.state.speed_to_lead.handle_enrichment_finished
+    )
     try:
         yield
     finally:
@@ -263,6 +303,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await icypeas_http.aclose()
         await kitt_http.aclose()
         await millionverifier_http.aclose()
+        if slack_http is not None:
+            await slack_http.aclose()
         if perplexity_client is not None:
             await perplexity_client.close()
         if supabase._postgrest is not None:
@@ -285,6 +327,8 @@ def create_app(
         cors_allowed_origins=origins,
     )
     application.include_router(smartlead_router)
+    application.include_router(speed_to_lead_router)
+    application.include_router(speed_to_lead_list_router)
     application.include_router(heyreach_router)
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)

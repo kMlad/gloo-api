@@ -109,6 +109,8 @@ class CampaignResponse(BaseModel):
     last_imported_at: datetime | None = None
     last_import_run_id: UUID | None = None
     last_imports: CampaignLastImports = Field(default_factory=CampaignLastImports)
+    speed_to_lead_enabled: bool = False
+    speed_to_lead_sdr_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -291,6 +293,7 @@ class LeadListItem(BaseModel):
     assigned_sdr_id: UUID | None = None
     assigned_by: UUID | None = None
     assigned_at: datetime | None = None
+    speed_to_lead_at: datetime | None = None
 
 
 class LeadListResponse(BaseModel):
