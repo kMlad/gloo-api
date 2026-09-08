@@ -194,6 +194,8 @@ class HeyReachCampaignResponse(BaseModel):
     last_imported_at: datetime | None = None
     last_import_run_id: UUID | None = None
     last_import: CampaignLastImport | None = None
+    speed_to_lead_enabled: bool = False
+    speed_to_lead_sdr_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

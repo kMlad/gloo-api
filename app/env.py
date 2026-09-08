@@ -42,6 +42,8 @@ class Env(BaseSettings):
     fullenrich_webhook_token: SecretStr = Field(min_length=32)
     smartlead_webhook_token: SecretStr = Field(min_length=32)
     smartlead_webhook_event_type: str = "LEAD_CATEGORY_UPDATED"
+    heyreach_webhook_token: SecretStr = Field(min_length=32)
+    heyreach_webhook_event_type: str = "LEAD_TAG_UPDATED"
     slack_bot_token: SecretStr | None = None
     slack_channel_id: str | None = None
     app_base_url: str | None = None

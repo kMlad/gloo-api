@@ -26,8 +26,12 @@ def _now() -> str:
 
 
 class FakeSpeedToLeadRepository:
-    def __init__(self, campaign: dict | None) -> None:
+    def __init__(
+        self, campaign: dict | None, heyreach_campaign: dict | None = None
+    ) -> None:
         self.campaign = campaign
+        self.heyreach_campaign = heyreach_campaign
+        self.heyreach_campaign_updates: list[dict] = []
         self.events: dict[str, dict] = {}
         self.assignments: list[tuple[str, str]] = []
         self.assigned_lead_ids: set[str] = set()
@@ -57,6 +61,30 @@ class FakeSpeedToLeadRepository:
             }
         )
         return deepcopy(self.campaign)
+
+    async def get_heyreach_campaign(self, campaign_id):
+        campaign = self.heyreach_campaign
+        if campaign and campaign["heyreach_campaign_id"] == campaign_id:
+            return deepcopy(campaign)
+        return None
+
+    async def update_heyreach_campaign(
+        self, campaign_id, *, enabled, sdr_id, webhook_id
+    ):
+        if self.heyreach_campaign is None:
+            return None
+        self.heyreach_campaign_updates.append(
+            {"enabled": enabled, "sdr_id": sdr_id, "webhook_id": webhook_id}
+        )
+        self.heyreach_campaign.update(
+            {
+                "speed_to_lead_enabled": enabled,
+                "speed_to_lead_sdr_id": sdr_id,
+                "heyreach_webhook_id": webhook_id,
+                "updated_at": _now(),
+            }
+        )
+        return deepcopy(self.heyreach_campaign)
 
     async def find_smartlead_conversation(self, *, campaign_id, email_normalized):
         return deepcopy(self.existing_conversation)

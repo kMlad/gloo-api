@@ -61,6 +61,7 @@ class SpeedToLeadNotifier:
         campaign_name: str,
         reply_excerpt: str | None,
         sdr_label: str | None,
+        channel_label: str | None = None,
     ) -> str:
         if self._slack is None or self._channel_id is None:
             raise RuntimeError("Slack notifications are not configured")
@@ -70,6 +71,7 @@ class SpeedToLeadNotifier:
             reply_excerpt=reply_excerpt,
             sdr_label=sdr_label,
             screen_url=self.screen_url,
+            channel_label=channel_label,
         )
         return await self._slack.post_message(self._channel_id, text, blocks=blocks)
 
@@ -89,13 +91,19 @@ class SpeedToLeadNotifier:
         reply_excerpt: str | None,
         sdr_label: str | None,
         screen_url: str | None,
+        channel_label: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         name = lead_display_name(lead)
         company = str(lead.get("company_name") or "").strip()
         who = f"{name} ({company})" if company else name
-        text = f"New positive reply: {who} · {campaign_name}"
+        headline = (
+            f"New positive {channel_label} reply"
+            if channel_label
+            else "New positive reply"
+        )
+        text = f"{headline}: {who} · {campaign_name}"
 
-        title = "*New positive reply*"
+        title = f"*{escape_mrkdwn(headline)}*"
         if screen_url:
             title += f" · <{screen_url}|Open speed to lead>"
         lines = [
@@ -107,6 +115,9 @@ class SpeedToLeadNotifier:
         email = str(lead.get("email") or "").strip()
         if email and email != name:
             lines.insert(2, f"*Email:* {escape_mrkdwn(email)}")
+        linkedin = str(lead.get("linkedin_profile") or "").strip()
+        if linkedin:
+            lines.insert(2, f"*LinkedIn:* <{linkedin}|{escape_mrkdwn(linkedin)}>")
         blocks: list[dict[str, Any]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
         ]

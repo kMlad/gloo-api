@@ -490,3 +490,25 @@ def test_speed_to_lead_migration_is_constrained_and_private() -> None:
     assert "to anon" not in migration
     assert "to authenticated" not in migration
     assert "drop column" not in migration
+
+
+def test_heyreach_speed_to_lead_migration_is_constrained() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_heyreach_speed_to_lead.sql")
+    ).read_text()
+
+    assert "alter table public.heyreach_campaigns" in migration
+    assert "add column speed_to_lead_enabled boolean not null default false" in (
+        migration
+    )
+    assert "add column speed_to_lead_sdr_id uuid references auth.users(id)" in (
+        migration
+    )
+    assert "add column heyreach_webhook_id text" in migration
+    assert "not speed_to_lead_enabled or speed_to_lead_sdr_id is not null" in (
+        migration
+    )
+    assert "heyreach_campaigns_speed_to_lead_sdr_idx" in migration
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration
+    assert "drop column" not in migration

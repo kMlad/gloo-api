@@ -183,3 +183,36 @@ class SpeedToLeadRepository:
             .execute()
         )
         return bool(response.data)
+
+    async def get_heyreach_campaign(self, campaign_id: int) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("heyreach_campaigns")
+            .select("*")
+            .eq("heyreach_campaign_id", campaign_id)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def update_heyreach_campaign(
+        self,
+        campaign_id: int,
+        *,
+        enabled: bool,
+        sdr_id: str | None,
+        webhook_id: str | None,
+    ) -> dict[str, Any] | None:
+        response = await (
+            self._db.table("heyreach_campaigns")
+            .update(
+                {
+                    "speed_to_lead_enabled": enabled,
+                    "speed_to_lead_sdr_id": sdr_id,
+                    "heyreach_webhook_id": webhook_id,
+                    "updated_at": to_iso(utc_now()),
+                }
+            )
+            .eq("heyreach_campaign_id", campaign_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None

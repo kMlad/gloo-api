@@ -9,6 +9,7 @@ from supabase_auth.types import User, UserResponse
 
 from app.dependencies import get_speed_to_lead_service
 from app.env import Env, get_env
+from app.heyreach.client import HeyReachError
 from app.main import create_app
 from app.smartlead.client import SmartLeadError
 from app.speed_to_lead.service import SpeedToLeadNotFoundError
@@ -16,6 +17,7 @@ from app.supabase_client import get_supabase
 from supabase import AuthApiError
 
 WEBHOOK_TOKEN = "test-smartlead-webhook-token-32-characters"
+HEYREACH_WEBHOOK_TOKEN = "test-heyreach-webhook-token-32-characters"
 
 
 def _env() -> Env:
@@ -34,6 +36,7 @@ def _env() -> Env:
             "test-fullenrich-webhook-token-32-characters"
         ),
         smartlead_webhook_token=SecretStr(WEBHOOK_TOKEN),
+        heyreach_webhook_token=SecretStr(HEYREACH_WEBHOOK_TOKEN),
     )
 
 
@@ -81,13 +84,38 @@ class SupabaseStub:
 class SpeedToLeadServiceStub:
     def __init__(self) -> None:
         self.webhook_payloads: list[dict] = []
+        self.heyreach_webhook_payloads: list[dict] = []
         self.configure_calls: list[dict] = []
+        self.heyreach_configure_calls: list[dict] = []
         self.configure_error: Exception | None = None
         self.processed = asyncio.Event()
 
     async def process_smartlead_webhook(self, payload: dict) -> None:
         self.webhook_payloads.append(payload)
         self.processed.set()
+
+    async def process_heyreach_webhook(self, payload: dict) -> None:
+        self.heyreach_webhook_payloads.append(payload)
+        self.processed.set()
+
+    async def configure_heyreach_campaign(self, campaign_id, *, enabled, sdr_id):
+        if self.configure_error is not None:
+            raise self.configure_error
+        self.heyreach_configure_calls.append(
+            {"campaign_id": campaign_id, "enabled": enabled, "sdr_id": sdr_id}
+        )
+        now = datetime.now(UTC).isoformat()
+        return {
+            "heyreach_campaign_id": campaign_id,
+            "name": "LinkedIn outreach",
+            "enabled": True,
+            "status": "ACTIVE",
+            "speed_to_lead_enabled": enabled,
+            "speed_to_lead_sdr_id": sdr_id,
+            "heyreach_webhook_id": "wh-9" if enabled else None,
+            "created_at": now,
+            "updated_at": now,
+        }
 
     async def list_events(
         self, *, limit, offset, include_handled=False, visible_to_sdr_id=None
@@ -407,3 +435,148 @@ async def test_speed_to_lead_list_requires_a_lead_role() -> None:
     assert unroled.status_code == 403
     assert anonymous.status_code == 401
     assert too_large.status_code in {403, 422}
+
+
+# ---------------------------------------------------------------- heyreach
+
+
+@pytest.mark.asyncio
+async def test_heyreach_webhook_rejects_wrong_token() -> None:
+    app, service = _app(actor=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/heyreach/webhooks/not-the-token", json={"campaign_id": 1}
+        )
+        smartlead_token = await client.post(
+            f"/api/v1/heyreach/webhooks/{WEBHOOK_TOKEN}", json={"campaign_id": 1}
+        )
+
+    assert response.status_code == 401
+    assert smartlead_token.status_code == 401
+    assert service.heyreach_webhook_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_heyreach_webhook_accepts_token_and_processes_in_background() -> None:
+    app, service = _app(actor=None)
+    payload = {"event_type": "LEAD_TAG_UPDATED", "campaign": {"id": 77}}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/heyreach/webhooks/{HEYREACH_WEBHOOK_TOKEN}", json=payload
+        )
+
+    assert response.status_code == 204
+    await asyncio.wait_for(service.processed.wait(), timeout=2)
+    assert service.heyreach_webhook_payloads == [payload]
+    assert service.webhook_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_heyreach_opt_in_without_sdr_is_rejected() -> None:
+    admin = _user(role="admin")
+    app, service = _app(actor=admin)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": True},
+        )
+
+    assert response.status_code == 422
+    assert service.heyreach_configure_calls == []
+
+
+@pytest.mark.asyncio
+async def test_heyreach_opt_in_with_non_sdr_user_is_rejected() -> None:
+    admin = _user(role="admin")
+    manager = _user(role="sales_lead")
+    app, service = _app(actor=admin, sdrs=[manager])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": True, "sdr_id": manager.id},
+        )
+
+    assert response.status_code == 422
+    assert service.heyreach_configure_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "sales_lead"])
+async def test_managers_can_enable_and_disable_heyreach(role: str) -> None:
+    actor = _user(role=role)
+    sdr = _user(role="sdr")
+    app, service = _app(actor=actor, sdrs=[sdr])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        enabled = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": True, "sdr_id": sdr.id},
+        )
+        disabled = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": False},
+        )
+
+    assert enabled.status_code == 200
+    body = enabled.json()
+    assert body["heyreach_campaign_id"] == 77
+    assert body["speed_to_lead_enabled"] is True
+    assert body["speed_to_lead_sdr_id"] == sdr.id
+    assert disabled.status_code == 200
+    assert disabled.json()["speed_to_lead_enabled"] is False
+    assert service.heyreach_configure_calls == [
+        {"campaign_id": 77, "enabled": True, "sdr_id": sdr.id},
+        {"campaign_id": 77, "enabled": False, "sdr_id": None},
+    ]
+    assert service.configure_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sdr_cannot_configure_heyreach_speed_to_lead() -> None:
+    sdr = _user(role="sdr")
+    app, service = _app(actor=sdr, sdrs=[sdr])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": True, "sdr_id": sdr.id},
+        )
+
+    assert response.status_code == 403
+    assert service.heyreach_configure_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (SpeedToLeadNotFoundError("HeyReach campaign is not configured"), 404),
+        (HeyReachError("bad campaign", status_code=400), 422),
+        (HeyReachError("down", status_code=503), 502),
+    ],
+)
+async def test_heyreach_failures_map_to_http_errors(
+    error: Exception, expected_status: int
+) -> None:
+    admin = _user(role="admin")
+    sdr = _user(role="sdr")
+    app, service = _app(actor=admin, sdrs=[sdr])
+    service.configure_error = error
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/api/v1/heyreach/campaigns/77/speed-to-lead",
+            headers={"Authorization": "Bearer jwt"},
+            json={"enabled": True, "sdr_id": sdr.id},
+        )
+
+    assert response.status_code == expected_status

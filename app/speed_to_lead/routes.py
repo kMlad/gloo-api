@@ -19,7 +19,8 @@ from app.auth import (
 )
 from app.dependencies import get_speed_to_lead_service
 from app.env import Env, get_env
-from app.models import CampaignResponse
+from app.heyreach.client import HeyReachError
+from app.models import CampaignResponse, HeyReachCampaignResponse
 from app.smartlead.client import SmartLeadError
 from app.speed_to_lead.schemas import (
     SpeedToLeadCampaignUpdate,
@@ -34,6 +35,7 @@ from app.supabase_client import get_supabase
 from supabase import AsyncClient
 
 router = APIRouter(prefix="/api/v1/smartlead", tags=["speed-to-lead"])
+heyreach_router = APIRouter(prefix="/api/v1/heyreach", tags=["speed-to-lead"])
 list_router = APIRouter(prefix="/api/v1/speed-to-lead", tags=["speed-to-lead"])
 
 ServiceDependency = Annotated[SpeedToLeadService, Depends(get_speed_to_lead_service)]
@@ -84,6 +86,57 @@ async def update_speed_to_lead(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except SmartLeadError as exc:
+        upstream_status = (
+            status.HTTP_422_UNPROCESSABLE_CONTENT
+            if exc.status_code in {400, 404, 422}
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(status_code=upstream_status, detail=str(exc)) from exc
+
+
+@heyreach_router.post("/webhooks/{token}", status_code=status.HTTP_204_NO_CONTENT)
+async def heyreach_webhook(
+    token: str,
+    payload: dict[str, Any],
+    service: ServiceDependency,
+    env: EnvDependency,
+    background_tasks: BackgroundTasks,
+) -> Response:
+    expected = env.heyreach_webhook_token.get_secret_value()
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid webhook")
+    background_tasks.add_task(service.process_heyreach_webhook, payload)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@heyreach_router.patch(
+    "/campaigns/{heyreach_campaign_id}/speed-to-lead",
+    response_model=HeyReachCampaignResponse,
+)
+async def update_heyreach_speed_to_lead(
+    heyreach_campaign_id: int,
+    payload: SpeedToLeadCampaignUpdate,
+    service: ServiceDependency,
+    supabase: SupabaseDependency,
+    _actor: Annotated[
+        AuthenticatedUser | None, Depends(require_internal_or_admin_or_sales_lead)
+    ],
+) -> dict[str, Any]:
+    if payload.sdr_id is not None:
+        await validate_active_sdr(supabase, str(payload.sdr_id))
+    try:
+        return await service.configure_heyreach_campaign(
+            heyreach_campaign_id,
+            enabled=payload.enabled,
+            sdr_id=str(payload.sdr_id) if payload.sdr_id is not None else None,
+        )
+    except SpeedToLeadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SpeedToLeadValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except HeyReachError as exc:
         upstream_status = (
             status.HTTP_422_UNPROCESSABLE_CONTENT
             if exc.status_code in {400, 404, 422}

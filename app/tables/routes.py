@@ -14,7 +14,7 @@ from fastapi import (
     status,
 )
 
-from app.auth import AuthenticatedUser, require_authenticated_user
+from app.auth import AuthenticatedUser, require_lead_user
 from app.dependencies import get_table_service
 from app.tables.csv_export import content_disposition_attachment
 from app.tables.csv_import import CsvImportError
@@ -50,11 +50,11 @@ from app.tables.sheriff import SheriffUnavailableError
 router = APIRouter(
     prefix="/api/v1/tables",
     tags=["tables"],
-    dependencies=[Depends(require_authenticated_user)],
+    dependencies=[Depends(require_lead_user)],
 )
 
 ServiceDependency = Annotated[TableService, Depends(get_table_service)]
-UserDependency = Annotated[AuthenticatedUser, Depends(require_authenticated_user)]
+UserDependency = Annotated[AuthenticatedUser, Depends(require_lead_user)]
 
 
 def _map_table_error(error: Exception) -> HTTPException:

@@ -33,6 +33,9 @@ def _env() -> Env:
         smartlead_webhook_token=SecretStr(
             "test-smartlead-webhook-token-32-characters"
         ),
+        heyreach_webhook_token=SecretStr(
+            "test-heyreach-webhook-token-32-characters"
+        ),
     )
 
 

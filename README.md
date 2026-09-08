@@ -20,6 +20,8 @@ Copy `.env.example` to `.env.local` and provide:
   `FULLENRICH_WEBHOOK_TOKEN`
 - a separate long random `SMARTLEAD_WEBHOOK_TOKEN` (32+ characters) that
   authenticates SmartLead speed-to-lead webhooks
+- a separate long random `HEYREACH_WEBHOOK_TOKEN` (32+ characters) that
+  authenticates HeyReach speed-to-lead webhooks
 - optionally `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`, and `APP_BASE_URL` for
   speed-to-lead Slack alerts
 - optionally `INVITE_REDIRECT_URL` (must be in the Auth redirect allow-list)
@@ -69,6 +71,10 @@ access token:
 ```text
 Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
 ```
+
+Lead and workbook access also requires an assigned `app_metadata.role` of
+`admin`, `sales_lead`, or `sdr`. An authenticated account without an app role
+cannot access workbooks or start enrichment/research runs.
 
 ## SmartLead workflow
 
@@ -267,13 +273,14 @@ creating a duplicate.
 Provider requests, responses, statuses, and safe errors are retained with each
 run. API keys and authorization headers are never written to audit records.
 
-## Speed to lead (SmartLead)
+## Speed to lead (SmartLead and HeyReach)
 
 Campaigns can opt in to speed-to-lead: when SmartLead moves a lead into a
-positive category, the API ingests the reply immediately, auto-assigns the lead
-to the campaign's SDR when it is still unassigned, and starts the phone
-enrichment waterfall for that one lead. Opt in per campaign with an admin or
-sales-lead JWT (or the internal token):
+positive category, or HeyReach auto-tags a LinkedIn reply as **Interested**, the
+API ingests the reply immediately, auto-assigns the lead to the campaign's SDR
+when it is still unassigned, and starts the phone enrichment waterfall for that
+one lead. Opt in per campaign with an admin or sales-lead JWT (or the internal
+token):
 
 ```shell
 curl -X PATCH http://127.0.0.1:8000/api/v1/smartlead/campaigns/12345/speed-to-lead \
@@ -295,9 +302,36 @@ background. Deliveries are deduplicated on campaign, lead email, category, and
 reply time, so SmartLead retries are safe. Each accepted positive reply is
 stored in `speed_to_lead_events` with its enrichment run id.
 
+HeyReach campaigns use the same contract:
+
+```shell
+curl -X PATCH http://127.0.0.1:8000/api/v1/heyreach/campaigns/90486/speed-to-lead \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "sdr_id": "00000000-0000-0000-0000-000000000000"}'
+```
+
+Enabling registers a HeyReach webhook subscription (`LEAD_TAG_UPDATED`, scoped
+to that campaign) pointing at
+`PUBLIC_API_BASE_URL/api/v1/heyreach/webhooks/<HEYREACH_WEBHOOK_TOKEN>` and
+stores its id in `heyreach_webhook_id`; disabling deletes the subscription.
+Override the event name with `HEYREACH_WEBHOOK_EVENT_TYPE`. The tag event is
+used rather than the reply event because HeyReach writes the Auto-Tag about 15
+minutes after the first reply, so a reply-received webhook has no sentiment yet.
+The handler accepts the tag from the payload (nested `lead.tags` or a flattened
+`lead_*` / `tag` form); when it is absent it falls back to the inbox record for
+the lead, exactly like imports. Only tags that map to **Interested** create an
+event. The lead's LinkedIn conversation is fetched and stored through the same
+`upsert_heyreach_lead_conversation` path as imports, the reply excerpt is the
+latest inbound LinkedIn message, and deliveries are deduplicated on campaign,
+LinkedIn profile, tag, and reply time (HeyReach retries up to five times over
+24 hours). Both webhook endpoints share the `POST /webhooks/{token}` shape;
+each platform has its own token.
+
 When `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are both set, each accepted reply
 posts an alert to that channel (lead, company, campaign, reply excerpt, assigned
-SDR, and a link to `APP_BASE_URL/speed-to-lead`). When the enrichment waterfall
+SDR, and a link to `APP_BASE_URL/speed-to-lead`). HeyReach alerts are titled
+"New positive LinkedIn reply" and link the lead's profile. When the enrichment waterfall
 finds a phone for that lead, the number and its source are posted as a thread
 reply under the alert. When the waterfall finishes without a phone, a thread
 reply summarises each provider's outcome (not found, skipped for missing input
@@ -321,7 +355,9 @@ GET /api/v1/speed-to-lead?limit=50&offset=0&include_handled=false
 
 Events are newest first and each carries the lead in the same shape as
 `GET /api/v1/leads` (plus `speed_to_lead_at`), the campaign name, and the phone
-enrichment run status when one was started. By default only events whose lead
+enrichment run status when one was started. `platform` tells SmartLead and
+HeyReach events apart; HeyReach events carry `heyreach_campaign_id`, no
+`category_id`, and the Auto-Tag label in `category_name`. By default only events whose lead
 status is still `new` are returned, so changing the lead status in the drawer
 clears the item; pass `include_handled=true` to see everything. SDRs only see
 events for leads assigned to them.

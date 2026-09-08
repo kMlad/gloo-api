@@ -557,6 +557,8 @@ class HeyReachImportService:
             "conversation_id": str(conversation["id"]),
             "campaign_id": campaign_id,
             "reply_count": reply_count,
+            "lead": lead,
+            "conversation": conversation,
         }
 
     async def _recategorize_existing(

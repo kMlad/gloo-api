@@ -108,15 +108,35 @@ Tests
   `LeadDetailDrawer`; status change invalidates the list. Poll 2s while any enrichment
   running, else 30s.
 
-## Phase 5: HeyReach
+## Phase 5: HeyReach (implemented 2026-09-08)
 
-- Same opt-in fields + `heyreach_webhook_id` on `heyreach_campaigns`.
-- Route `POST /api/v1/heyreach/webhooks/{token}`, env `HEYREACH_WEBHOOK_TOKEN`.
-- Handler maps Interested auto-tag -> positive event, reuses
-  `upsert_heyreach_lead_conversation` RPC and `HeyReachImportService` helpers.
-- Check whether HeyReach webhooks fire on tag change or only on message receipt (auto-tag
-  lands ~15 min after the first reply); pick trigger accordingly.
-- UI: same toggle in the HeyReach campaign drawer; list already platform-aware.
+- Migration `20260908120000_heyreach_speed_to_lead.sql`: same opt-in fields +
+  `heyreach_webhook_id` on `heyreach_campaigns`, same enabled-implies-SDR check.
+- Env `HEYREACH_WEBHOOK_TOKEN` (required, min 32) and `HEYREACH_WEBHOOK_EVENT_TYPE`
+  (default `LEAD_TAG_UPDATED`).
+- Trigger: HeyReach exposes `LEAD_TAG_UPDATED` (alongside `MESSAGE_REPLY_RECEIVED`,
+  `EVERY_MESSAGE_REPLY_RECEIVED`, ...), so the tag event is the trigger; a reply-received
+  webhook carries no sentiment yet. Enabling calls `POST /webhooks/CreateWebhook`
+  (`webhookName`, `webhookUrl`, `eventType`, `campaignIds`), re-enabling uses
+  `PATCH /webhooks/UpdateWebhook` (falls back to create on 404), disabling calls
+  `DELETE /webhooks/DeleteWebhook?webhookId=` (404 tolerated).
+- Routes in `app/speed_to_lead/routes.py` (`heyreach_router`):
+  `POST /api/v1/heyreach/webhooks/{token}` and
+  `PATCH /api/v1/heyreach/campaigns/{id}/speed-to-lead`. `HeyReachCampaignResponse` now
+  carries `speed_to_lead_enabled` / `speed_to_lead_sdr_id`.
+- `SpeedToLeadService.handle_heyreach_tag_update`: campaign gate -> LinkedIn URL
+  (`lead.profile_url`, nested or flattened `lead_*`) -> tag from payload
+  (`lead.tags`, `tag`, ...) else inbox record / chatroom via
+  `HeyReachImportService.auto_tag_label` -> positive only -> fetch + hydrate
+  conversation -> dedupe on (campaign, linkedin, tag, latest inbound time) ->
+  `HeyReachImportService._persist_item` (now also returns `lead` / `conversation`) ->
+  shared `_record_event` (assign, insert, Slack, enrich). Slack alert is labelled
+  "LinkedIn" and links the profile.
+- Webhook payload field names are taken from third-party integration docs
+  (nested `lead` / `campaign` / `sender`, `event_type`, `timestamp`, `correlation_id`);
+  the parser is lenient (camelCase, snake_case, flattened). Verify against the first live
+  delivery and tighten if needed.
+- UI: same toggle in the HeyReach campaign drawer; list already platform-aware (open).
 
 ## Unresolved questions
 

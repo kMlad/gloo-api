@@ -247,3 +247,87 @@ class HeyReachClient:
             ) or len(items) < 100:
                 break
         return accounts
+
+    async def list_webhooks(self) -> list[dict[str, Any]]:
+        webhooks: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = self._page(
+                await self._request(
+                    "POST",
+                    "/webhooks/GetAllWebhooks",
+                    json={"offset": offset, "limit": 100},
+                )
+            )
+            items = page["items"]
+            webhooks.extend(items)
+            offset += len(items)
+            total = page.get("totalCount")
+            if not items or (
+                total is not None and offset >= int(total)
+            ) or len(items) < 100:
+                break
+        return webhooks
+
+    async def save_webhook(
+        self,
+        *,
+        name: str,
+        webhook_url: str,
+        event_type: str,
+        campaign_ids: list[int],
+        webhook_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a webhook subscription and return a record with its id."""
+        body: dict[str, Any] = {
+            "webhookName": name,
+            "webhookUrl": webhook_url,
+            "eventType": event_type,
+            "campaignIds": campaign_ids,
+        }
+        payload: Any = None
+        if webhook_id not in (None, ""):
+            try:
+                payload = await self._request(
+                    "PATCH",
+                    "/webhooks/UpdateWebhook",
+                    json={**body, "webhookId": webhook_id, "isActive": True},
+                )
+            except HeyReachError as exc:
+                if exc.status_code != 404:
+                    raise
+                payload = None
+            else:
+                return {**self._webhook_record(payload), "id": str(webhook_id)}
+        payload = await self._request("POST", "/webhooks/CreateWebhook", json=body)
+        record = self._webhook_record(payload)
+        identifier = record.get("id") or record.get("webhookId")
+        if identifier is None:
+            for existing in await self.list_webhooks():
+                if (
+                    str(existing.get("webhookUrl") or existing.get("webhook_url") or "")
+                    == webhook_url
+                    and str(existing.get("eventType") or "") == event_type
+                ):
+                    identifier = existing.get("id") or existing.get("webhookId")
+                    record = {**existing, **record}
+                    break
+        if identifier is None:
+            raise HeyReachError("HeyReach did not return a webhook id")
+        return {**record, "id": str(identifier)}
+
+    async def delete_webhook(self, webhook_id: str) -> None:
+        await self._request(
+            "DELETE",
+            "/webhooks/DeleteWebhook",
+            params={"webhookId": webhook_id},
+        )
+
+    @staticmethod
+    def _webhook_record(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        record = payload.get("data", payload)
+        if isinstance(record, list):
+            record = next((item for item in record if isinstance(item, dict)), {})
+        return record if isinstance(record, dict) else {}

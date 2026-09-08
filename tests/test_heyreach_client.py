@@ -203,3 +203,169 @@ async def test_invalid_json_is_reported() -> None:
     ) as http_client:
         with pytest.raises(HeyReachError, match="invalid JSON"):
             await HeyReachClient(http_client, "secret", max_retries=0).get_campaign(1)
+
+
+@pytest.mark.asyncio
+async def test_create_webhook_posts_subscription_and_returns_id() -> None:
+    captured: list[tuple[str, str, dict]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"id": 42, "webhookName": "Gloo"})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        saved = await HeyReachClient(http_client, "secret", max_retries=0).save_webhook(
+            name="Gloo",
+            webhook_url="https://api.example.com/hook",
+            event_type="LEAD_TAG_UPDATED",
+            campaign_ids=[10],
+        )
+
+    assert saved["id"] == "42"
+    assert captured == [
+        (
+            "POST",
+            "/api/public/webhooks/CreateWebhook",
+            {
+                "webhookName": "Gloo",
+                "webhookUrl": "https://api.example.com/hook",
+                "eventType": "LEAD_TAG_UPDATED",
+                "campaignIds": [10],
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_webhook_falls_back_to_listing_when_id_is_missing() -> None:
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/CreateWebhook"):
+            return httpx.Response(200, content=b"")
+        return httpx.Response(
+            200,
+            json={
+                "totalCount": 2,
+                "items": [
+                    {"id": 1, "webhookUrl": "https://other", "eventType": "X"},
+                    {
+                        "id": 9,
+                        "webhookUrl": "https://api.example.com/hook",
+                        "eventType": "LEAD_TAG_UPDATED",
+                    },
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        saved = await HeyReachClient(http_client, "secret", max_retries=0).save_webhook(
+            name="Gloo",
+            webhook_url="https://api.example.com/hook",
+            event_type="LEAD_TAG_UPDATED",
+            campaign_ids=[10],
+        )
+
+    assert saved["id"] == "9"
+    assert paths == [
+        "/api/public/webhooks/CreateWebhook",
+        "/api/public/webhooks/GetAllWebhooks",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_webhook_patches_and_recreates_when_missing() -> None:
+    captured: list[tuple[str, str, dict]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        captured.append((request.method, request.url.path, body))
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": 5})
+        return httpx.Response(200, json={"id": 6})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = HeyReachClient(http_client, "secret", max_retries=0)
+        updated = await client.save_webhook(
+            name="Gloo",
+            webhook_url="https://api.example.com/hook",
+            event_type="LEAD_TAG_UPDATED",
+            campaign_ids=[10],
+            webhook_id="5",
+        )
+
+    assert updated["id"] == "5"
+    assert captured[0][0] == "PATCH"
+    assert captured[0][1] == "/api/public/webhooks/UpdateWebhook"
+    assert captured[0][2]["webhookId"] == "5"
+    assert captured[0][2]["isActive"] is True
+    assert captured[0][2]["campaignIds"] == [10]
+
+    captured.clear()
+
+    async def missing(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        captured.append((request.method, request.url.path, body))
+        if request.method == "PATCH":
+            return httpx.Response(404, json={"message": "not found"})
+        return httpx.Response(200, json={"id": 6})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(missing),
+    ) as http_client:
+        client = HeyReachClient(http_client, "secret", max_retries=0)
+        recreated = await client.save_webhook(
+            name="Gloo",
+            webhook_url="https://api.example.com/hook",
+            event_type="LEAD_TAG_UPDATED",
+            campaign_ids=[10],
+            webhook_id="5",
+        )
+
+    assert recreated["id"] == "6"
+    assert [item[0] for item in captured] == ["PATCH", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_delete_webhook_uses_query_param_and_surfaces_errors() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        await HeyReachClient(http_client, "secret", max_retries=0).delete_webhook("42")
+
+    assert captured["method"] == "DELETE"
+    assert captured["url"].path == "/api/public/webhooks/DeleteWebhook"
+    assert captured["url"].params["webhookId"] == "42"
+
+    async def gone(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Webhook not found"})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.heyreach.io/api/public/",
+        transport=httpx.MockTransport(gone),
+    ) as http_client:
+        with pytest.raises(HeyReachError) as excinfo:
+            await HeyReachClient(http_client, "secret", max_retries=0).delete_webhook(
+                "42"
+            )
+
+    assert excinfo.value.status_code == 404

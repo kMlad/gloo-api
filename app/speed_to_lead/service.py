@@ -8,7 +8,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from app.heyreach.client import HeyReachClient, HeyReachError
+from app.heyreach.service import HeyReachImportService
 from app.phone_enrichment.parser import reply_to_text
+from app.phone_enrichment.providers.linkedin import canonical_linkedin_profile
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
 from app.phone_enrichment.service import (
     EnrichmentConflictError,
@@ -24,6 +27,7 @@ from app.speed_to_lead.schemas import SpeedToLeadOutcome
 from app.utils import first_present, normalize_email, parse_datetime, to_iso, utc_now
 
 if TYPE_CHECKING:
+    from app.heyreach.repository import HeyReachRepository
     from app.phone_enrichment.service import PhoneEnrichmentService
     from app.repositories import Repository
 
@@ -32,6 +36,27 @@ logger = logging.getLogger(__name__)
 WEBHOOK_NAME = "Gloo speed to lead"
 REPLY_EXCERPT_LENGTH = 280
 CATEGORY_CACHE_SECONDS = 3600
+HEYREACH_EVENT_TYPE = "LEAD_TAG_UPDATED"
+_HEYREACH_TAG_KEYS = (
+    "tag",
+    "tag_name",
+    "tagName",
+    "lead_tag",
+    "leadTag",
+    "new_tag",
+    "newTag",
+    "auto_tag",
+    "autoTag",
+)
+_HEYREACH_PROFILE_KEYS = (
+    "profile_url",
+    "profileUrl",
+    "linkedin_url",
+    "linkedinUrl",
+    "linkedin_profile",
+    "linkedInProfileUrl",
+    "url",
+)
 
 
 class SpeedToLeadNotFoundError(Exception):
@@ -61,6 +86,10 @@ class SpeedToLeadService:
         event_type: str = "LEAD_CATEGORY_UPDATED",
         category_cache_seconds: int = CATEGORY_CACHE_SECONDS,
         notifier: SpeedToLeadNotifier | None = None,
+        heyreach: HeyReachClient | None = None,
+        heyreach_repository: HeyReachRepository | None = None,
+        heyreach_webhook_url: str | None = None,
+        heyreach_event_type: str = HEYREACH_EVENT_TYPE,
     ) -> None:
         self._repository = repository
         self._leads = leads
@@ -71,6 +100,14 @@ class SpeedToLeadService:
         self._category_cache_seconds = category_cache_seconds
         self._category_cache: tuple[float, dict[int, str]] | None = None
         self._notifier = notifier
+        self._heyreach = heyreach
+        self._heyreach_webhook_url = heyreach_webhook_url
+        self._heyreach_event_type = heyreach_event_type
+        self._heyreach_importer: HeyReachImportService | None = None
+        if heyreach is not None and heyreach_repository is not None:
+            self._heyreach_importer = HeyReachImportService(
+                heyreach_repository, heyreach, max_conversations=1
+            )
 
     # ------------------------------------------------------------------ opt-in
 
@@ -127,6 +164,55 @@ class SpeedToLeadService:
         )
         if updated is None:
             raise SpeedToLeadNotFoundError("SmartLead campaign is not configured")
+        return updated
+
+    async def configure_heyreach_campaign(
+        self, campaign_id: int, *, enabled: bool, sdr_id: str | None
+    ) -> dict[str, Any]:
+        if self._heyreach is None or self._heyreach_webhook_url is None:
+            raise SpeedToLeadValidationError(
+                "HeyReach speed to lead is not configured on this server"
+            )
+        campaign = await self._repository.get_heyreach_campaign(campaign_id)
+        if campaign is None:
+            raise SpeedToLeadNotFoundError("HeyReach campaign is not configured")
+        if enabled and sdr_id is None:
+            raise SpeedToLeadValidationError(
+                "sdr_id is required to enable speed to lead"
+            )
+
+        existing_webhook_id = campaign.get("heyreach_webhook_id")
+        webhook_id: str | None
+        if enabled:
+            saved = await self._heyreach.save_webhook(
+                name=WEBHOOK_NAME,
+                webhook_url=self._heyreach_webhook_url,
+                event_type=self._heyreach_event_type,
+                campaign_ids=[campaign_id],
+                webhook_id=(
+                    str(existing_webhook_id)
+                    if existing_webhook_id not in (None, "")
+                    else None
+                ),
+            )
+            webhook_id = str(saved["id"])
+        else:
+            if existing_webhook_id not in (None, ""):
+                try:
+                    await self._heyreach.delete_webhook(str(existing_webhook_id))
+                except HeyReachError as exc:
+                    if exc.status_code != 404:
+                        raise
+            webhook_id = None
+
+        updated = await self._repository.update_heyreach_campaign(
+            campaign_id,
+            enabled=enabled,
+            sdr_id=sdr_id,
+            webhook_id=webhook_id,
+        )
+        if updated is None:
+            raise SpeedToLeadNotFoundError("HeyReach campaign is not configured")
         return updated
 
     # -------------------------------------------------------------------- list
@@ -295,37 +381,206 @@ class SpeedToLeadService:
             received_times=received_times,
             replied_at=replied_at,
         )
-        lead = persisted["lead"]
-        conversation = persisted["conversation"]
-        lead_id = str(lead["id"])
-
-        sdr_id = campaign.get("speed_to_lead_sdr_id")
-        if lead.get("assigned_sdr_id") is None and sdr_id:
-            assigned = await self._repository.assign_lead_if_unassigned(
-                lead_id, sdr_id=str(sdr_id)
-            )
-            if assigned:
-                lead = {**lead, "assigned_sdr_id": str(sdr_id)}
-
-        event = await self._repository.insert_event(
-            {
+        return await self._record_event(
+            lead=persisted["lead"],
+            campaign_sdr_id=campaign.get("speed_to_lead_sdr_id"),
+            campaign_name=str(
+                campaign.get("name") or f"SmartLead campaign {campaign_id}"
+            ),
+            channel_label=None,
+            values={
                 "platform": "smartlead",
-                "lead_id": lead_id,
                 "smartlead_campaign_id": campaign_id,
                 "heyreach_campaign_id": None,
-                "conversation_id": str(conversation["id"]),
+                "conversation_id": str(persisted["conversation"]["id"]),
                 "category_id": category_id,
                 "category_name": category_name,
                 "reply_excerpt": self._reply_excerpt(inbound_messages, payload),
                 "replied_at": to_iso(replied_at),
                 "dedupe_key": dedupe_key,
-                "notification_status": "pending",
+            },
+        )
+
+    # ---------------------------------------------------------------- heyreach
+
+    async def process_heyreach_webhook(self, payload: dict[str, Any]) -> None:
+        """Background-task boundary: never raises."""
+        try:
+            result = await self.handle_heyreach_tag_update(payload)
+        except Exception:
+            logger.exception("Speed-to-lead HeyReach webhook processing failed")
+            return
+        logger.info(
+            "Speed-to-lead HeyReach webhook handled",
+            extra={
+                "outcome": result.outcome,
+                "reason": result.reason,
+                "event_id": (result.event or {}).get("id"),
+            },
+        )
+
+    async def handle_heyreach_tag_update(
+        self, payload: dict[str, Any]
+    ) -> SpeedToLeadResult:
+        importer = self._heyreach_importer
+        if importer is None:
+            return SpeedToLeadResult(
+                "invalid_payload", reason="heyreach is not configured"
+            )
+        event_type = self._heyreach_event_name(payload)
+        if event_type and event_type != self._heyreach_event_type.upper():
+            return SpeedToLeadResult("ignored_event", reason=event_type)
+
+        campaign_id = self._heyreach_campaign_id(payload)
+        if campaign_id is None:
+            return SpeedToLeadResult("invalid_payload", reason="missing campaign id")
+        campaign = await self._repository.get_heyreach_campaign(campaign_id)
+        if campaign is None or not campaign.get("speed_to_lead_enabled"):
+            return SpeedToLeadResult("campaign_not_enabled")
+
+        profile = self._heyreach_lead(payload)
+        linkedin = canonical_linkedin_profile(
+            first_present(profile, _HEYREACH_PROFILE_KEYS)
+            or first_present(
+                payload, ["lead_profile_url", "leadProfileUrl", "profile_url"]
+            )
+        )
+        if linkedin is None:
+            return SpeedToLeadResult(
+                "invalid_payload", reason="missing lead profile url"
+            )
+
+        # The tag usually rides on the payload; fall back to the inbox record
+        # (and its chatroom) the same way imports do.
+        auto_tag = self._heyreach_payload_tag(payload) or importer.auto_tag_label(
+            payload, profile
+        )
+        conversation = await importer._conversation_for_lead(campaign_id, linkedin)
+        if auto_tag is None:
+            auto_tag = importer.auto_tag_label(conversation)
+        if auto_tag is None:
+            conversation = await importer._hydrate_conversation_messages(conversation)
+            auto_tag = importer.auto_tag_label(conversation)
+        reply_type = importer.reply_type_for_auto_tag(auto_tag)
+        if reply_type != "positive":
+            return SpeedToLeadResult("not_positive", reason=auto_tag)
+
+        conversation = await importer._hydrate_conversation_messages(conversation)
+        messages = [
+            message
+            for message in conversation.get("messages") or []
+            if isinstance(message, dict)
+        ]
+        inbound = [
+            message
+            for message in messages
+            if importer._message_direction(message) == "inbound"
+        ]
+        received_times = [
+            importer._message_received_at(message) for message in inbound
+        ]
+        replied_at = (
+            max(received_times)
+            if received_times
+            else self._heyreach_timestamp(payload)
+        )
+        dedupe_key = self._heyreach_dedupe_key(
+            campaign_id=campaign_id,
+            linkedin=linkedin,
+            auto_tag=auto_tag,
+            replied_at=replied_at,
+        )
+        if await self._repository.get_event_by_dedupe_key(dedupe_key) is not None:
+            return SpeedToLeadResult("duplicate")
+
+        sender = self._heyreach_sender(payload)
+        sender_id = first_present(
+            sender, ["id", "linkedin_account_id", "linkedInAccountId", "account_id"]
+        )
+        item: dict[str, Any] = {
+            "linkedInUserProfile": {**profile, "profileUrl": linkedin},
+            "lastActionTime": to_iso(replied_at),
+            "_campaign_id": campaign_id,
+            "_webhook_event": {
+                "event_type": payload.get("event_type") or payload.get("eventType"),
+                "timestamp": payload.get("timestamp"),
+                "correlation_id": payload.get("correlation_id")
+                or payload.get("correlationId"),
+            },
+        }
+        lead_external_id = first_present(
+            profile, ["id", "lead_id", "leadId", "linkedin_id", "linkedinId"]
+        ) or first_present(payload, ["lead_id", "leadId"])
+        if lead_external_id is not None:
+            item["id"] = lead_external_id
+        if sender_id is not None:
+            item["linkedInAccountId"] = sender_id
+        if sender:
+            item["linkedInAccount"] = sender
+
+        persisted = await importer._persist_item(
+            {
+                "item": item,
+                "profile": item["linkedInUserProfile"],
+                "linkedin": linkedin,
+                "conversation": conversation,
+                "auto_tag": auto_tag,
+                "reply_type": reply_type,
+                "campaign_id": campaign_id,
             }
+        )
+        if persisted is None:
+            return SpeedToLeadResult("invalid_payload", reason="lead not persisted")
+
+        return await self._record_event(
+            lead=persisted["lead"],
+            campaign_sdr_id=campaign.get("speed_to_lead_sdr_id"),
+            campaign_name=str(
+                campaign.get("name") or f"HeyReach campaign {campaign_id}"
+            ),
+            channel_label="LinkedIn",
+            values={
+                "platform": "heyreach",
+                "smartlead_campaign_id": None,
+                "heyreach_campaign_id": campaign_id,
+                "conversation_id": str(persisted["conversation"]["id"]),
+                "category_id": None,
+                "category_name": auto_tag,
+                "reply_excerpt": self._heyreach_reply_excerpt(
+                    inbound, payload, importer
+                ),
+                "replied_at": to_iso(replied_at),
+                "dedupe_key": dedupe_key,
+            },
+        )
+
+    async def _record_event(
+        self,
+        *,
+        lead: dict[str, Any],
+        campaign_sdr_id: Any,
+        campaign_name: str,
+        channel_label: str | None,
+        values: dict[str, Any],
+    ) -> SpeedToLeadResult:
+        """Assign, store, notify, and enrich one accepted positive reply."""
+        lead_id = str(lead["id"])
+        if lead.get("assigned_sdr_id") is None and campaign_sdr_id:
+            assigned = await self._repository.assign_lead_if_unassigned(
+                lead_id, sdr_id=str(campaign_sdr_id)
+            )
+            if assigned:
+                lead = {**lead, "assigned_sdr_id": str(campaign_sdr_id)}
+
+        event = await self._repository.insert_event(
+            {**values, "lead_id": lead_id, "notification_status": "pending"}
         )
         if event is None:
             return SpeedToLeadResult("duplicate")
 
-        event = await self._notify_alert(event, lead=lead, campaign=campaign)
+        event = await self._notify_alert(
+            event, lead=lead, campaign_name=campaign_name, channel_label=channel_label
+        )
         event = await self._start_enrichment(event, lead_id)
         return SpeedToLeadResult("processed", event=event)
 
@@ -386,7 +641,8 @@ class SpeedToLeadService:
         event: dict[str, Any],
         *,
         lead: dict[str, Any],
-        campaign: dict[str, Any],
+        campaign_name: str,
+        channel_label: str | None = None,
     ) -> dict[str, Any]:
         event_id = str(event["id"])
         if self._notifier is None or not self._notifier.enabled:
@@ -403,11 +659,10 @@ class SpeedToLeadService:
         try:
             ts = await self._notifier.post_alert(
                 lead=lead,
-                campaign_name=str(
-                    campaign.get("name") or f"SmartLead campaign {campaign.get('smartlead_campaign_id')}"
-                ),
+                campaign_name=campaign_name,
                 reply_excerpt=event.get("reply_excerpt"),
                 sdr_label=sdr_label,
+                channel_label=channel_label,
             )
         except Exception as exc:
             logger.exception(
@@ -725,6 +980,116 @@ class SpeedToLeadService:
             campaign_id,
             email_normalized,
             category_id if category_id is not None else "",
+            to_iso(replied_at),
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    # ---------------------------------------------------- heyreach helpers
+
+    @staticmethod
+    def _heyreach_event_name(payload: dict[str, Any]) -> str:
+        value = first_present(payload, ["event_type", "eventType", "event", "type"])
+        return str(value or "").strip().upper()
+
+    @staticmethod
+    def _heyreach_campaign_id(payload: dict[str, Any]) -> int | None:
+        value = first_present(payload, ["campaign_id", "campaignId"])
+        campaign = payload.get("campaign")
+        if value is None and isinstance(campaign, dict):
+            value = first_present(campaign, ["id", "campaign_id", "campaignId"])
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _heyreach_nested(payload: dict[str, Any], key: str) -> dict[str, Any]:
+        """Return ``payload[key]`` or rebuild it from flattened ``key_*`` fields."""
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return dict(nested)
+        prefix = f"{key}_"
+        return {
+            name[len(prefix) :]: value
+            for name, value in payload.items()
+            if name.startswith(prefix) and name != prefix
+        }
+
+    @classmethod
+    def _heyreach_lead(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        for key in ("lead", "linkedInUserProfile", "profile"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                return dict(nested)
+        return cls._heyreach_nested(payload, "lead")
+
+    @classmethod
+    def _heyreach_sender(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        for key in ("sender", "linkedInAccount", "linkedin_account", "account"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                return dict(nested)
+        return cls._heyreach_nested(payload, "sender")
+
+    @staticmethod
+    def _heyreach_payload_tag(payload: dict[str, Any]) -> str | None:
+        for key in _HEYREACH_TAG_KEYS:
+            label = HeyReachImportService._auto_tag_value(payload.get(key))
+            if label:
+                return label
+        return None
+
+    @staticmethod
+    def _heyreach_timestamp(payload: dict[str, Any]) -> datetime:
+        for key in ("timestamp", "event_timestamp", "eventTimestamp", "time", "occurred_at"):
+            value = payload.get(key)
+            if value:
+                try:
+                    return parse_datetime(value)
+                except ValueError:
+                    continue
+        return utc_now()
+
+    @staticmethod
+    def _heyreach_reply_excerpt(
+        inbound: list[dict[str, Any]],
+        payload: dict[str, Any],
+        importer: HeyReachImportService,
+    ) -> str | None:
+        body = ""
+        if inbound:
+            latest = max(inbound, key=importer._message_received_at)
+            body = importer._message_body(latest)
+        if not body:
+            message = payload.get("message")
+            if isinstance(message, dict):
+                body = importer._message_body(message)
+            else:
+                body = str(
+                    first_present(
+                        payload, ["message", "message_text", "messageText", "text"]
+                    )
+                    or ""
+                )
+        text = " ".join(str(body).split())
+        if not text:
+            return None
+        if len(text) > REPLY_EXCERPT_LENGTH:
+            return text[: REPLY_EXCERPT_LENGTH - 1].rstrip() + "…"
+        return text
+
+    @staticmethod
+    def _heyreach_dedupe_key(
+        *,
+        campaign_id: int,
+        linkedin: str,
+        auto_tag: str | None,
+        replied_at: datetime,
+    ) -> str:
+        material = "heyreach:{}:{}:{}:{}".format(
+            campaign_id,
+            linkedin,
+            HeyReachImportService._normalize_auto_tag(auto_tag or ""),
             to_iso(replied_at),
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()

@@ -35,6 +35,9 @@ def _env() -> Env:
         smartlead_webhook_token=SecretStr(
             "test-smartlead-webhook-token-32-characters"
         ),
+        heyreach_webhook_token=SecretStr(
+            "test-heyreach-webhook-token-32-characters"
+        ),
     )
 
 
@@ -129,6 +132,45 @@ async def test_table_routes_require_a_valid_user_jwt() -> None:
         assert ok.status_code == 200
         assert ok.json()["items"][0]["name"] == "Outbound"
 
+    assert service.listed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/v1/tables"),
+    ("DELETE", f"/api/v1/tables/{uuid4()}"),
+    ("POST", f"/api/v1/tables/{uuid4()}/columns/{uuid4()}/runs"),
+])
+async def test_table_routes_reject_users_without_an_assigned_app_role(
+    method: str, path: str,
+) -> None:
+    service = TableServiceStub()
+    user = _user(role=None)
+    user.user_metadata["role"] = "admin"
+    app = _app(SupabaseStub(AuthStub(current_user=user)), service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.request(
+            method, path, headers={"Authorization": "Bearer user-jwt"}
+        )
+    assert response.status_code == 403
+    assert service.listed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["admin", "sales_lead", "sdr"])
+async def test_table_routes_allow_assigned_app_roles(role: AppRole) -> None:
+    service = TableServiceStub()
+    app = _app(SupabaseStub(AuthStub(current_user=_user(role=role))), service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/api/v1/tables", headers={"Authorization": "Bearer user-jwt"}
+        )
+    assert response.status_code == 200
     assert service.listed is True
 
 

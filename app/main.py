@@ -34,6 +34,9 @@ from app.routes.users import router as users_router
 from app.smartlead.client import SmartLeadClient
 from app.speed_to_lead.notifications import SpeedToLeadNotifier
 from app.speed_to_lead.repository import SpeedToLeadRepository
+from app.speed_to_lead.routes import (
+    heyreach_router as speed_to_lead_heyreach_router,
+)
 from app.speed_to_lead.routes import list_router as speed_to_lead_list_router
 from app.speed_to_lead.routes import router as speed_to_lead_router
 from app.speed_to_lead.service import SpeedToLeadService
@@ -284,6 +287,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             channel_id=env.slack_channel_id,
             app_base_url=env.app_base_url,
         ),
+        heyreach=app.state.heyreach,
+        heyreach_repository=app.state.heyreach_repository,
+        heyreach_webhook_url=(
+            env.public_api_base_url.rstrip("/")
+            + "/api/v1/heyreach/webhooks/"
+            + env.heyreach_webhook_token.get_secret_value()
+        ),
+        heyreach_event_type=env.heyreach_webhook_event_type,
     )
     app.state.phone_enrichment.add_phone_enriched_listener(
         app.state.speed_to_lead.handle_phone_enriched
@@ -329,6 +340,7 @@ def create_app(
     application.include_router(smartlead_router)
     application.include_router(speed_to_lead_router)
     application.include_router(speed_to_lead_list_router)
+    application.include_router(speed_to_lead_heyreach_router)
     application.include_router(heyreach_router)
     application.include_router(leads_router)
     application.include_router(phone_enrichment_router)
