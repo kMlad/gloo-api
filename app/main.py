@@ -31,6 +31,7 @@ from app.routes.heyreach import router as heyreach_router
 from app.routes.leads import router as leads_router
 from app.routes.smartlead import router as smartlead_router
 from app.routes.users import router as users_router
+from app.sdr_settings import SdrSettingsRepository
 from app.smartlead.client import SmartLeadClient
 from app.speed_to_lead.notifications import SpeedToLeadNotifier
 from app.speed_to_lead.repository import SpeedToLeadRepository
@@ -262,7 +263,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     slack_http = None
     slack_client = None
-    if env.slack_bot_token is not None and env.slack_channel_id is not None:
+    if env.slack_bot_token is not None:
         slack_http = httpx.AsyncClient(
             base_url="https://slack.com/api/",
             timeout=httpx.Timeout(10.0),
@@ -287,6 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             channel_id=env.slack_channel_id,
             app_base_url=env.app_base_url,
         ),
+        sdr_settings=SdrSettingsRepository(supabase),
         heyreach=app.state.heyreach,
         heyreach_repository=app.state.heyreach_repository,
         heyreach_webhook_url=(

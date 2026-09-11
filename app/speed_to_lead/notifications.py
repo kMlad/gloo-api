@@ -46,7 +46,10 @@ class SpeedToLeadNotifier:
 
     @property
     def enabled(self) -> bool:
-        return self._slack is not None and self._channel_id is not None
+        return self._slack is not None
+
+    def resolve_channel(self, channel_id: str | None = None) -> str | None:
+        return channel_id or self._channel_id
 
     @property
     def screen_url(self) -> str | None:
@@ -62,8 +65,10 @@ class SpeedToLeadNotifier:
         reply_excerpt: str | None,
         sdr_label: str | None,
         channel_label: str | None = None,
+        channel_id: str | None = None,
     ) -> str:
-        if self._slack is None or self._channel_id is None:
+        channel = self.resolve_channel(channel_id)
+        if self._slack is None or channel is None:
             raise RuntimeError("Slack notifications are not configured")
         text, blocks = self.format_alert(
             lead=lead,
@@ -73,14 +78,22 @@ class SpeedToLeadNotifier:
             screen_url=self.screen_url,
             channel_label=channel_label,
         )
-        return await self._slack.post_message(self._channel_id, text, blocks=blocks)
+        return await self._slack.post_message(channel, text, blocks=blocks)
 
-    async def post_phone(self, *, thread_ts: str, phone: str, source: str) -> str:
-        if self._slack is None or self._channel_id is None:
+    async def post_phone(
+        self,
+        *,
+        thread_ts: str,
+        phone: str,
+        source: str,
+        channel_id: str | None = None,
+    ) -> str:
+        channel = self.resolve_channel(channel_id)
+        if self._slack is None or channel is None:
             raise RuntimeError("Slack notifications are not configured")
         text, blocks = self.format_phone(phone=phone, source=source)
         return await self._slack.post_message(
-            self._channel_id, text, blocks=blocks, thread_ts=thread_ts
+            channel, text, blocks=blocks, thread_ts=thread_ts
         )
 
     @staticmethod
@@ -131,17 +144,38 @@ class SpeedToLeadNotifier:
         return text, blocks
 
     async def post_enrichment_summary(
-        self, *, thread_ts: str, items: list[dict[str, Any]]
+        self,
+        *,
+        thread_ts: str,
+        items: list[dict[str, Any]],
+        channel_id: str | None = None,
     ) -> str | None:
-        if self._slack is None or self._channel_id is None:
+        channel = self.resolve_channel(channel_id)
+        if self._slack is None or channel is None:
             raise RuntimeError("Slack notifications are not configured")
         formatted = self.format_enrichment_summary(items=items)
         if formatted is None:
             return None
         text, blocks = formatted
         return await self._slack.post_message(
-            self._channel_id, text, blocks=blocks, thread_ts=thread_ts
+            channel, text, blocks=blocks, thread_ts=thread_ts
         )
+
+    async def post_outside_hours(
+        self, *, thread_ts: str, channel_id: str | None = None
+    ) -> str:
+        channel = self.resolve_channel(channel_id)
+        if self._slack is None or channel is None:
+            raise RuntimeError("Slack notifications are not configured")
+        text, blocks = self.format_outside_hours()
+        return await self._slack.post_message(
+            channel, text, blocks=blocks, thread_ts=thread_ts
+        )
+
+    @staticmethod
+    def format_outside_hours() -> tuple[str, list[dict[str, Any]]]:
+        text = "Outside working hours; phone enrichment skipped."
+        return text, [_section(f":crescent_moon: {escape_mrkdwn(text)}")]
 
     @staticmethod
     def format_enrichment_summary(

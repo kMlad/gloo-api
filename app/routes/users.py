@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -7,9 +8,22 @@ from app.auth import (
     parse_app_role,
     require_admin_or_sales_lead,
     require_authenticated_user,
+    validate_active_sdr,
 )
 from app.env import Env, get_env
-from app.models import AppRole, InviteUserRequest, InviteUserResponse, SDRListItem
+from app.models import (
+    AppRole,
+    InviteUserRequest,
+    InviteUserResponse,
+    SDRListItem,
+    SDRSettingsUpdate,
+)
+from app.sdr_settings import (
+    SdrSettingsRepository,
+    apply_settings_update,
+    get_sdr_settings_repository,
+    settings_from_row,
+)
 from app.supabase_client import get_supabase
 from app.utils import normalize_email, utc_now
 from supabase import AsyncClient, AuthApiError
@@ -29,6 +43,9 @@ SupabaseDependency = Annotated[AsyncClient, Depends(get_supabase)]
 EnvDependency = Annotated[Env, Depends(get_env)]
 ManagerDependency = Annotated[
     AuthenticatedUser, Depends(require_admin_or_sales_lead)
+]
+SdrSettingsDependency = Annotated[
+    SdrSettingsRepository, Depends(get_sdr_settings_repository)
 ]
 
 
@@ -53,8 +70,9 @@ def _http_status_for_auth_error(error: AuthApiError) -> int:
 @router.get("/sdrs", response_model=list[SDRListItem])
 async def list_sdrs(
     supabase: SupabaseDependency,
+    settings_repository: SdrSettingsDependency,
     _actor: ManagerDependency,
-) -> list[dict[str, str]]:
+) -> list[dict]:
     users = []
     page = 1
     per_page = 1000
@@ -81,7 +99,42 @@ async def list_sdrs(
         and user.deleted_at is None
         and user.banned_until is None
     ]
-    return sorted(items, key=lambda item: (item["email"].casefold(), item["id"]))
+    items = sorted(items, key=lambda item: (item["email"].casefold(), item["id"]))
+    settings_by_id = await settings_repository.list_for_users(
+        [item["id"] for item in items]
+    )
+    return [
+        {
+            **item,
+            "settings": settings_from_row(settings_by_id.get(item["id"])),
+        }
+        for item in items
+    ]
+
+
+@router.patch("/sdrs/{sdr_id}", response_model=SDRListItem)
+async def update_sdr_settings(
+    sdr_id: UUID,
+    payload: SDRSettingsUpdate,
+    supabase: SupabaseDependency,
+    settings_repository: SdrSettingsDependency,
+    _actor: ManagerDependency,
+) -> dict:
+    await validate_active_sdr(supabase, str(sdr_id))
+    current = settings_from_row(await settings_repository.get(str(sdr_id)))
+    settings = apply_settings_update(current, payload)
+    stored = await settings_repository.upsert(str(sdr_id), settings)
+    email = await _sdr_email(supabase, str(sdr_id))
+    return {
+        "id": sdr_id,
+        "email": email,
+        "settings": settings_from_row(stored) or settings,
+    }
+
+
+async def _sdr_email(supabase: AsyncClient, sdr_id: str) -> str:
+    response = await supabase.auth.admin.get_user_by_id(sdr_id)
+    return response.user.email or ""
 
 
 @router.post(

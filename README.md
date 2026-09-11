@@ -22,8 +22,9 @@ Copy `.env.example` to `.env.local` and provide:
   authenticates SmartLead speed-to-lead webhooks
 - a separate long random `HEYREACH_WEBHOOK_TOKEN` (32+ characters) that
   authenticates HeyReach speed-to-lead webhooks
-- optionally `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`, and `APP_BASE_URL` for
-  speed-to-lead Slack alerts
+- optionally `SLACK_BOT_TOKEN` and `APP_BASE_URL` for speed-to-lead Slack
+  alerts, plus optional `SLACK_CHANNEL_ID` as a fallback channel when an SDR
+  has none of their own
 - optionally `INVITE_REDIRECT_URL` (must be in the Auth redirect allow-list)
 
 Never expose the Supabase secret key or internal token in a browser client.
@@ -239,8 +240,18 @@ curl -X POST http://127.0.0.1:8000/api/v1/leads/assignments \
   -d '{"lead_ids": ["00000000-0000-0000-0000-000000000000"], "sdr_id": "11111111-1111-1111-1111-111111111111"}'
 ```
 
-Use `GET /api/v1/users/sdrs` to populate the assignee picker. Explicit recovery
-operations are `PUT /api/v1/leads/{lead_id}/assignment` with an `sdr_id` to
+Use `GET /api/v1/users/sdrs` to populate the assignee picker. Each item can
+include `settings` (Slack channel and working hours) when those have been
+saved. Configure them with `PATCH /api/v1/users/sdrs/{sdr_id}`:
+
+```shell
+curl -X PATCH http://127.0.0.1:8000/api/v1/users/sdrs/$SDR_ID \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"slack_channel_id": "C0123456789", "work_days": [1, 2, 3, 4, 5], "work_start": "09:00:00", "work_end": "18:00:00"}'
+```
+
+Explicit recovery operations are `PUT /api/v1/leads/{lead_id}/assignment` with an `sdr_id` to
 replace the owner and `DELETE /api/v1/leads/{lead_id}/assignment` to unassign.
 Only admins and sales leads may use these operations.
 
@@ -334,10 +345,14 @@ LinkedIn profile, tag, and reply time (HeyReach retries up to five times over
 24 hours). Both webhook endpoints share the `POST /webhooks/{token}` shape;
 each platform has its own token.
 
-When `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are both set, each accepted reply
-posts an alert to that channel (lead, company, campaign, reply excerpt, assigned
-SDR, and a link to `APP_BASE_URL/speed-to-lead`). HeyReach alerts are titled
-"New positive LinkedIn reply" and link the lead's profile. When the enrichment waterfall
+When `SLACK_BOT_TOKEN` is set, each accepted reply posts an alert to the
+assigned SDR's Slack channel when they have one, otherwise to `SLACK_CHANNEL_ID`
+(lead, company, campaign, reply excerpt, assigned SDR, and a link to
+`APP_BASE_URL/speed-to-lead`). HeyReach alerts are titled
+"New positive LinkedIn reply" and link the lead's profile. Phone enrichment
+runs only inside that SDR's working hours (weekdays, start/end in Europe/Skopje
+on their settings). Outside those hours the alert still posts and a thread note
+explains that enrichment was skipped. When the enrichment waterfall
 finds a phone for that lead, the number and its source are posted as a thread
 reply under the alert. When the waterfall finishes without a phone, a thread
 reply summarises each provider's outcome (not found, skipped for missing input
@@ -348,10 +363,11 @@ credit balance (Prospeo `INSUFFICIENT_CREDITS`, AirScale `403 Insufficient
 credits`, any `402`) are recorded with `error_code = insufficient_credits`, are
 not retried, and the waterfall moves on to the next provider.
 The bot needs the `chat:write` scope and must be invited
-to the channel; incoming webhooks cannot thread, so a bot token is required.
+to each SDR channel; incoming webhooks cannot thread, so a bot token is required.
 Slack failures are recorded on the event row (`notification_status`,
 `notification_error`) and never block ingest or enrichment. Without the Slack
-settings the feature no-ops and events are marked `skipped`.
+bot token, or without a channel on the SDR and no `SLACK_CHANNEL_ID` fallback,
+the alert no-ops and events are marked `skipped`.
 
 List the live queue with any lead-role JWT:
 

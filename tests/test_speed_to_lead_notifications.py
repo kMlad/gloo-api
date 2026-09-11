@@ -77,10 +77,10 @@ def test_lead_display_name_falls_back() -> None:
     assert lead_display_name({}) == "Unknown lead"
 
 
-def test_notifier_is_disabled_without_client_or_channel() -> None:
+def test_notifier_is_disabled_without_client() -> None:
     assert SpeedToLeadNotifier(None, channel_id="C1").enabled is False
-    assert SpeedToLeadNotifier(SlackStub(), channel_id=None).enabled is False
-    assert SpeedToLeadNotifier(SlackStub(), channel_id="").enabled is False
+    assert SpeedToLeadNotifier(SlackStub(), channel_id=None).enabled is True
+    assert SpeedToLeadNotifier(SlackStub(), channel_id="").enabled is True
     assert SpeedToLeadNotifier(SlackStub(), channel_id="C1").enabled is True
 
 
@@ -110,6 +110,45 @@ async def test_notifier_posts_alert_and_threaded_phone() -> None:
     )
     assert slack.messages[1]["thread_ts"] == "1.0"
     assert slack.messages[1]["text"] == "Phone found: +14155552671 (via Prospeo)"
+
+
+@pytest.mark.asyncio
+async def test_notifier_posts_to_per_call_channel() -> None:
+    slack = SlackStub()
+    notifier = SpeedToLeadNotifier(slack, channel_id="CDEFAULT")
+
+    await notifier.post_alert(
+        lead={"first_name": "Pat"},
+        campaign_name="Campaign",
+        reply_excerpt=None,
+        sdr_label=None,
+        channel_id="CSDRCHANNEL1",
+    )
+    await notifier.post_phone(
+        thread_ts="1.0",
+        phone="+1",
+        source="prospeo",
+        channel_id="CSDRCHANNEL1",
+    )
+    await notifier.post_outside_hours(thread_ts="1.0", channel_id="CSDRCHANNEL1")
+
+    assert [message["channel"] for message in slack.messages] == [
+        "CSDRCHANNEL1",
+        "CSDRCHANNEL1",
+        "CSDRCHANNEL1",
+    ]
+    assert slack.messages[2]["text"] == (
+        "Outside working hours; phone enrichment skipped."
+    )
+
+
+@pytest.mark.asyncio
+async def test_notifier_without_any_channel_refuses_to_post() -> None:
+    notifier = SpeedToLeadNotifier(SlackStub(), channel_id=None)
+    with pytest.raises(RuntimeError):
+        await notifier.post_alert(
+            lead={}, campaign_name="c", reply_excerpt=None, sdr_label=None
+        )
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +13,8 @@ from app.models import (
     LeadAssignmentRequest,
     LeadSource,
     LeadUpdate,
+    SDRSettings,
+    SDRSettingsUpdate,
 )
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
 
@@ -171,3 +173,34 @@ def test_lead_source_requires_a_campaign_id() -> None:
             reply_type="positive",
             qualified_at=qualified_at,
         )
+
+
+def test_sdr_settings_defaults_and_rejects_invalid_values() -> None:
+    settings = SDRSettings()
+    assert settings.timezone == "Europe/Skopje"
+    assert settings.work_days == [1, 2, 3, 4, 5]
+    assert settings.work_start == time(9, 0)
+    assert settings.work_end == time(18, 0)
+    assert settings.slack_channel_id is None
+
+    assert SDRSettings(slack_channel_id=" C0C04R07874 ").slack_channel_id == (
+        "C0C04R07874"
+    )
+    assert SDRSettingsUpdate(slack_channel_id="").slack_channel_id is None
+
+    with pytest.raises(ValidationError):
+        SDRSettings(slack_channel_id="not-a-channel")
+    with pytest.raises(ValidationError):
+        SDRSettings(timezone="America/New_York")
+    with pytest.raises(ValidationError):
+        SDRSettings(work_days=[])
+    with pytest.raises(ValidationError):
+        SDRSettings(work_days=[1, 1])
+    with pytest.raises(ValidationError):
+        SDRSettings(work_start=time(18, 0), work_end=time(9, 0))
+    with pytest.raises(ValidationError):
+        SDRSettingsUpdate()
+    with pytest.raises(ValidationError):
+        SDRSettingsUpdate(work_days=None)
+    with pytest.raises(ValidationError):
+        SDRSettingsUpdate(work_start=time(19, 0), work_end=time(18, 0))

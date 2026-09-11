@@ -44,6 +44,8 @@ class SpeedToLeadEvent(BaseModel):
     notification_status: NotificationStatus = "pending"
     notification_error: str | None = None
     slack_message_ts: str | None = None
+    slack_channel_id: str | None = None
+    enrichment_skipped_reason: Literal["outside_working_hours"] | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from app.heyreach.client import HeyReachClient, HeyReachError
 from app.heyreach.service import HeyReachImportService
+from app.models import SDRSettings
 from app.phone_enrichment.parser import reply_to_text
 from app.phone_enrichment.providers.linkedin import canonical_linkedin_profile
 from app.phone_enrichment.schemas import PhoneEnrichmentRequest
@@ -18,6 +19,11 @@ from app.phone_enrichment.service import (
     EnrichmentNotFoundError,
     EnrichmentValidationError,
     PhoneEnrichedEvent,
+)
+from app.sdr_settings import (
+    SdrSettingsRepository,
+    is_within_working_hours,
+    settings_from_row,
 )
 from app.services import ImportService, _message_body
 from app.smartlead.client import SmartLeadClient, SmartLeadError
@@ -86,6 +92,7 @@ class SpeedToLeadService:
         event_type: str = "LEAD_CATEGORY_UPDATED",
         category_cache_seconds: int = CATEGORY_CACHE_SECONDS,
         notifier: SpeedToLeadNotifier | None = None,
+        sdr_settings: SdrSettingsRepository | None = None,
         heyreach: HeyReachClient | None = None,
         heyreach_repository: HeyReachRepository | None = None,
         heyreach_webhook_url: str | None = None,
@@ -100,6 +107,7 @@ class SpeedToLeadService:
         self._category_cache_seconds = category_cache_seconds
         self._category_cache: tuple[float, dict[int, str]] | None = None
         self._notifier = notifier
+        self._sdr_settings = sdr_settings
         self._heyreach = heyreach
         self._heyreach_webhook_url = heyreach_webhook_url
         self._heyreach_event_type = heyreach_event_type
@@ -578,9 +586,20 @@ class SpeedToLeadService:
         if event is None:
             return SpeedToLeadResult("duplicate")
 
-        event = await self._notify_alert(
-            event, lead=lead, campaign_name=campaign_name, channel_label=channel_label
+        assigned_sdr_id = lead.get("assigned_sdr_id")
+        settings = await self._settings_for_sdr(
+            str(assigned_sdr_id) if assigned_sdr_id else None
         )
+        event = await self._notify_alert(
+            event,
+            lead=lead,
+            campaign_name=campaign_name,
+            channel_label=channel_label,
+            settings=settings,
+        )
+        if not is_within_working_hours(settings, utc_now()):
+            event = await self._skip_enrichment_outside_hours(event)
+            return SpeedToLeadResult("processed", event=event)
         event = await self._start_enrichment(event, lead_id)
         return SpeedToLeadResult("processed", event=event)
 
@@ -598,6 +617,7 @@ class SpeedToLeadService:
                 thread_ts=str(event["slack_message_ts"]),
                 phone=phone_event.phone,
                 source=phone_event.source,
+                channel_id=event.get("slack_channel_id"),
             )
         except Exception as exc:
             logger.exception(
@@ -623,7 +643,9 @@ class SpeedToLeadService:
             return  # the phone follow-up was already threaded by handle_phone_enriched
         try:
             await self._notifier.post_enrichment_summary(
-                thread_ts=str(event["slack_message_ts"]), items=items
+                thread_ts=str(event["slack_message_ts"]),
+                items=items,
+                channel_id=event.get("slack_channel_id"),
             )
         except Exception as exc:
             logger.exception(
@@ -643,9 +665,20 @@ class SpeedToLeadService:
         lead: dict[str, Any],
         campaign_name: str,
         channel_label: str | None = None,
+        settings: SDRSettings | None = None,
     ) -> dict[str, Any]:
         event_id = str(event["id"])
-        if self._notifier is None or not self._notifier.enabled:
+        channel_id = settings.slack_channel_id if settings is not None else None
+        resolved_channel = (
+            self._notifier.resolve_channel(channel_id)
+            if self._notifier is not None
+            else None
+        )
+        if (
+            self._notifier is None
+            or not self._notifier.enabled
+            or resolved_channel is None
+        ):
             updated = await self._repository.update_event(
                 event_id, {"notification_status": "skipped"}
             )
@@ -663,6 +696,7 @@ class SpeedToLeadService:
                 reply_excerpt=event.get("reply_excerpt"),
                 sdr_label=sdr_label,
                 channel_label=channel_label,
+                channel_id=channel_id,
             )
         except Exception as exc:
             logger.exception(
@@ -677,7 +711,35 @@ class SpeedToLeadService:
                 "notification_status": "sent",
                 "notification_error": None,
                 "slack_message_ts": ts,
+                "slack_channel_id": resolved_channel,
             }
+        updated = await self._repository.update_event(event_id, values)
+        return updated or {**event, **values}
+
+    async def _settings_for_sdr(self, sdr_id: str | None) -> SDRSettings | None:
+        if not sdr_id or self._sdr_settings is None:
+            return None
+        return settings_from_row(await self._sdr_settings.get(sdr_id))
+
+    async def _skip_enrichment_outside_hours(
+        self, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        event_id = str(event["id"])
+        if event.get("slack_message_ts") and self._notifier is not None:
+            try:
+                await self._notifier.post_outside_hours(
+                    thread_ts=str(event["slack_message_ts"]),
+                    channel_id=event.get("slack_channel_id"),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Speed-to-lead outside-hours notification failed",
+                    extra={"event_id": event_id},
+                )
+                await self._repository.update_event(
+                    event_id, {"notification_error": str(exc)[:500]}
+                )
+        values = {"enrichment_skipped_reason": "outside_working_hours"}
         updated = await self._repository.update_event(event_id, values)
         return updated or {**event, **values}
 

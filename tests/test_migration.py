@@ -534,3 +534,57 @@ def test_lead_location_filter_migration_indexes_and_searches_substrings() -> Non
         "    to service_role"
     ) in migration
     assert "drop column" not in migration
+
+
+def test_sdr_settings_migration_is_private_and_constrained() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_sdr_settings.sql")
+    ).read_text()
+
+    assert "create table public.sdr_settings" in migration
+    assert "user_id uuid primary key references auth.users(id) on delete cascade" in (
+        migration
+    )
+    assert "slack_channel_id text" in migration
+    assert "timezone text not null default 'Europe/Skopje'" in migration
+    assert "work_days smallint[] not null default '{1,2,3,4,5}'" in migration
+    assert "work_start time not null default '09:00'" in migration
+    assert "work_end time not null default '18:00'" in migration
+    assert "work_start < work_end" in migration
+    assert "alter table public.sdr_settings enable row level security" in migration
+    assert (
+        "revoke all on table public.sdr_settings from public, anon, authenticated"
+        in migration
+    )
+    assert (
+        "grant select, insert, update, delete on table public.sdr_settings\n"
+        "    to service_role"
+    ) in migration
+    assert "add column slack_channel_id text" in migration
+    assert "add column enrichment_skipped_reason text" in migration
+    assert "outside_working_hours" in migration
+    assert "to anon" not in migration
+    assert "to authenticated" not in migration
+    assert "drop column" not in migration
+
+
+def test_sdr_timezone_skopje_migration_updates_default() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_sdr_timezone_skopje.sql")
+    ).read_text()
+
+    assert "alter column timezone set default 'Europe/Skopje'" in migration
+    assert "timezone = 'Europe/Skopje'" in migration
+    assert "where timezone = 'Europe/Paris'" in migration
+    assert "drop column" not in migration
+
+
+def test_sdr_timezone_is_locked_to_skopje() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_sdr_timezone_skopje_only.sql")
+    ).read_text()
+
+    assert "drop constraint sdr_settings_timezone_check" in migration
+    assert "check (timezone = 'Europe/Skopje')" in migration
+    assert "where timezone is distinct from 'Europe/Skopje'" in migration
+    assert "drop column" not in migration

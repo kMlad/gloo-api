@@ -1,8 +1,9 @@
-from datetime import datetime
+import re
+from datetime import datetime, time
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 PhoneSource = Literal[
     "smartlead_signature",
@@ -369,9 +370,99 @@ class LeadAssignmentRecord(BaseModel):
     assigned_at: datetime | None
 
 
+DEFAULT_SDR_TIMEZONE = "Europe/Skopje"
+DEFAULT_SDR_WORK_DAYS = (1, 2, 3, 4, 5)
+DEFAULT_SDR_WORK_START = time(9, 0)
+DEFAULT_SDR_WORK_END = time(18, 0)
+_SLACK_CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
+ISO_WEEKDAY_MIN = 1
+ISO_WEEKDAY_MAX = 7
+
+
+def _parse_optional_slack_channel_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("slack_channel_id must be a string")
+    channel_id = value.strip()
+    if not channel_id:
+        return None
+    if _SLACK_CHANNEL_ID_RE.fullmatch(channel_id) is None:
+        raise ValueError("slack_channel_id must be a Slack channel id")
+    return channel_id
+
+
+def _validate_work_days(work_days: list[int]) -> list[int]:
+    if not work_days:
+        raise ValueError("work_days must not be empty")
+    if any(day < ISO_WEEKDAY_MIN or day > ISO_WEEKDAY_MAX for day in work_days):
+        raise ValueError("work_days must be ISO weekdays from 1 (Monday) to 7 (Sunday)")
+    unique_days = list(dict.fromkeys(work_days))
+    if len(unique_days) != len(work_days):
+        raise ValueError("work_days must not contain duplicates")
+    return unique_days
+
+
+class SDRSettings(BaseModel):
+    slack_channel_id: str | None = None
+    timezone: Literal["Europe/Skopje"] = DEFAULT_SDR_TIMEZONE
+    work_days: list[int] = Field(default_factory=lambda: list(DEFAULT_SDR_WORK_DAYS))
+    work_start: time = DEFAULT_SDR_WORK_START
+    work_end: time = DEFAULT_SDR_WORK_END
+
+    @field_validator("slack_channel_id", mode="before")
+    @classmethod
+    def normalize_slack_channel_id(cls, value: object) -> str | None:
+        return _parse_optional_slack_channel_id(value)
+
+    @field_validator("work_days")
+    @classmethod
+    def validate_work_days(cls, work_days: list[int]) -> list[int]:
+        return _validate_work_days(work_days)
+
+    @model_validator(mode="after")
+    def validate_work_window(self) -> "SDRSettings":
+        if self.work_start >= self.work_end:
+            raise ValueError("work_start must be before work_end")
+        return self
+
+
+class SDRSettingsUpdate(BaseModel):
+    slack_channel_id: str | None = None
+    work_days: list[int] | None = None
+    work_start: time | None = None
+    work_end: time | None = None
+
+    @field_validator("slack_channel_id", mode="before")
+    @classmethod
+    def normalize_slack_channel_id(cls, value: object) -> str | None:
+        return _parse_optional_slack_channel_id(value)
+
+    @model_validator(mode="after")
+    def validate_update(self) -> "SDRSettingsUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one settings field must be provided")
+        if "work_days" in self.model_fields_set:
+            if self.work_days is None:
+                raise ValueError("work_days must not be null")
+            self.work_days = _validate_work_days(self.work_days)
+        if "work_start" in self.model_fields_set and self.work_start is None:
+            raise ValueError("work_start must not be null")
+        if "work_end" in self.model_fields_set and self.work_end is None:
+            raise ValueError("work_end must not be null")
+        if (
+            self.work_start is not None
+            and self.work_end is not None
+            and self.work_start >= self.work_end
+        ):
+            raise ValueError("work_start must be before work_end")
+        return self
+
+
 class SDRListItem(BaseModel):
     id: UUID
     email: str
+    settings: SDRSettings | None = None
 
 
 class InviteUserRequest(BaseModel):

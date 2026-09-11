@@ -325,6 +325,15 @@ class SlackStub:
         return f"{len(self.messages)}.0"
 
 
+class FakeSdrSettingsRepository:
+    def __init__(self, rows: dict[str, dict] | None = None) -> None:
+        self.rows = dict(rows or {})
+
+    async def get(self, user_id: str):
+        row = self.rows.get(user_id)
+        return deepcopy(row) if row else None
+
+
 def _notifier(slack: SlackStub | None) -> SpeedToLeadNotifier:
     return SpeedToLeadNotifier(
         slack, channel_id="C1", app_base_url="https://app.example.com"
@@ -337,6 +346,7 @@ def _service(
     smartlead=None,
     enrichment=None,
     notifier=None,
+    sdr_settings=None,
 ) -> tuple[SpeedToLeadService, FakeLeadRepository, FakeSmartLead, FakePhoneEnrichment]:
     leads = leads or FakeLeadRepository()
     smartlead = smartlead or FakeSmartLead()
@@ -348,6 +358,7 @@ def _service(
         enrichment,
         webhook_url="https://api.example.com/api/v1/smartlead/webhooks/token",
         notifier=notifier,
+        sdr_settings=sdr_settings,
     )
     return service, leads, smartlead, enrichment
 
@@ -809,6 +820,106 @@ async def test_alert_is_posted_before_enrichment_and_ts_is_stored() -> None:
     assert "*Assigned:* sdr@gloo.example" in section
     assert "https://app.example.com/speed-to-lead" in section
     assert message["blocks"][1]["text"]["text"] == "> Yes, let's talk. Call me."
+
+
+def _sdr_settings_row(**overrides) -> dict:
+    row = {
+        "user_id": SDR_ID,
+        "slack_channel_id": "CSDRCHANNEL1",
+        "timezone": "Europe/Skopje",
+        "work_days": [1, 2, 3, 4, 5],
+        "work_start": "09:00:00",
+        "work_end": "18:00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_alert_posts_to_assigned_sdr_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.speed_to_lead.service.utc_now",
+        lambda: datetime(2026, 9, 11, 8, 0, tzinfo=UTC),
+    )
+    repository = FakeSpeedToLeadRepository(_campaign())
+    slack = SlackStub()
+    service, _, _, enrichment = _service(
+        repository,
+        notifier=_notifier(slack),
+        sdr_settings=FakeSdrSettingsRepository({SDR_ID: _sdr_settings_row()}),
+    )
+
+    result = await service.handle_smartlead_category_update(_payload())
+
+    assert slack.messages[0]["channel"] == "CSDRCHANNEL1"
+    assert result.event is not None
+    assert result.event["slack_channel_id"] == "CSDRCHANNEL1"
+    assert result.event["enrichment_run_id"] is not None
+    assert len(enrichment.started) == 1
+
+
+@pytest.mark.asyncio
+async def test_outside_working_hours_alerts_without_enriching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.speed_to_lead.service.utc_now",
+        lambda: datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+    )
+    repository = FakeSpeedToLeadRepository(_campaign())
+    slack = SlackStub()
+    service, _, _, enrichment = _service(
+        repository,
+        notifier=_notifier(slack),
+        sdr_settings=FakeSdrSettingsRepository({SDR_ID: _sdr_settings_row()}),
+    )
+
+    result = await service.handle_smartlead_category_update(_payload())
+
+    assert result.event is not None
+    assert result.event["notification_status"] == "sent"
+    assert result.event["slack_message_ts"] == "1.0"
+    assert result.event["enrichment_run_id"] is None
+    assert result.event["enrichment_skipped_reason"] == "outside_working_hours"
+    assert enrichment.started == []
+    assert slack.messages[1]["thread_ts"] == "1.0"
+    assert slack.messages[1]["channel"] == "CSDRCHANNEL1"
+    assert slack.messages[1]["text"] == (
+        "Outside working hours; phone enrichment skipped."
+    )
+
+
+@pytest.mark.asyncio
+async def test_phone_follow_up_uses_stored_sdr_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.speed_to_lead.service.utc_now",
+        lambda: datetime(2026, 9, 11, 8, 0, tzinfo=UTC),
+    )
+    repository = FakeSpeedToLeadRepository(_campaign())
+    slack = SlackStub()
+    service, leads, _, _ = _service(
+        repository,
+        notifier=_notifier(slack),
+        sdr_settings=FakeSdrSettingsRepository({SDR_ID: _sdr_settings_row()}),
+    )
+    result = await service.handle_smartlead_category_update(_payload())
+    assert result.event is not None
+
+    await service.handle_phone_enriched(
+        PhoneEnrichedEvent(
+            run_id=result.event["enrichment_run_id"],
+            lead_id=leads.lead_id,
+            phone="+14155552671",
+            source="prospeo",
+        )
+    )
+
+    assert slack.messages[1]["channel"] == "CSDRCHANNEL1"
+    assert slack.messages[1]["thread_ts"] == "1.0"
 
 
 @pytest.mark.asyncio

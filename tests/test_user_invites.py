@@ -9,7 +9,8 @@ from supabase_auth.types import User, UserResponse
 
 from app.env import Env, get_env
 from app.main import create_app
-from app.models import AppRole
+from app.models import AppRole, SDRSettings
+from app.sdr_settings import get_sdr_settings_repository
 from app.supabase_client import get_supabase
 from supabase import AuthApiError
 
@@ -83,6 +84,14 @@ class AuthAdminStub:
             raise self.list_error
         return self.users
 
+    async def get_user_by_id(self, user_id: str) -> UserResponse:
+        user = next((item for item in self.users if item.id == user_id), None)
+        if user is None and self.invited.id == user_id:
+            user = self.invited
+        if user is None:
+            raise AuthApiError("User not found", 404, "user_not_found")
+        return UserResponse(user=user)
+
     async def invite_user_by_email(
         self, email: str, options: dict[str, Any] | None = None
     ) -> UserResponse:
@@ -132,10 +141,45 @@ class SupabaseStub:
         self.auth = auth
 
 
-def _app(supabase: SupabaseStub, env: Env | None = None):
+class FakeSdrSettingsRepository:
+    def __init__(self, rows: dict[str, dict[str, Any]] | None = None) -> None:
+        self.rows = dict(rows or {})
+        self.upserts: list[tuple[str, Any]] = []
+
+    async def get(self, user_id: str) -> dict[str, Any] | None:
+        row = self.rows.get(user_id)
+        return dict(row) if row else None
+
+    async def list_for_users(self, user_ids: list[str]) -> dict[str, dict[str, Any]]:
+        return {
+            user_id: dict(self.rows[user_id])
+            for user_id in user_ids
+            if user_id in self.rows
+        }
+
+    async def upsert(self, user_id: str, settings: SDRSettings) -> dict[str, Any]:
+        self.upserts.append((user_id, settings))
+        row = {
+            "user_id": user_id,
+            "slack_channel_id": settings.slack_channel_id,
+            "timezone": settings.timezone,
+            "work_days": settings.work_days,
+            "work_start": settings.work_start.strftime("%H:%M:%S"),
+            "work_end": settings.work_end.strftime("%H:%M:%S"),
+            "created_at": "2026-09-11T10:00:00Z",
+            "updated_at": "2026-09-11T10:00:00Z",
+        }
+        self.rows[user_id] = row
+        return dict(row)
+
+
+def _app(supabase: SupabaseStub, env: Env | None = None, settings=None):
     application = create_app(use_lifespan=False)
+    settings = settings or FakeSdrSettingsRepository()
     application.dependency_overrides[get_env] = lambda: env or _env()
     application.dependency_overrides[get_supabase] = lambda: supabase
+    application.dependency_overrides[get_sdr_settings_repository] = lambda: settings
+    application.state.sdr_settings = settings
     return application
 
 
@@ -327,7 +371,9 @@ async def test_sales_lead_can_list_only_sdr_users() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == [{"id": sdr.id, "email": "sdr@example.com"}]
+    assert response.json() == [
+        {"id": sdr.id, "email": "sdr@example.com", "settings": None}
+    ]
 
 
 @pytest.mark.asyncio
@@ -345,3 +391,139 @@ async def test_sdr_cannot_list_sdr_users() -> None:
         )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_sdrs_includes_stored_settings() -> None:
+    sdr = _user(
+        role="sdr",
+        email="sdr@example.com",
+        user_id="11111111-1111-1111-1111-111111111111",
+    )
+    supabase = SupabaseStub(
+        AuthStub(current_user=_user(role="admin"), invited=sdr)
+    )
+    supabase.auth.admin.users = [sdr]
+    settings = FakeSdrSettingsRepository(
+        {
+            sdr.id: {
+                "user_id": sdr.id,
+                "slack_channel_id": "C0C04R07874",
+                "timezone": "Europe/Skopje",
+                "work_days": [1, 2, 3, 4, 5],
+                "work_start": "09:30:00",
+                "work_end": "17:00:00",
+            }
+        }
+    )
+    app = _app(supabase, settings=settings)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/api/v1/users/sdrs",
+            headers={"Authorization": "Bearer jwt"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["settings"] == {
+        "slack_channel_id": "C0C04R07874",
+        "timezone": "Europe/Skopje",
+        "work_days": [1, 2, 3, 4, 5],
+        "work_start": "09:30:00",
+        "work_end": "17:00:00",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manager_can_configure_sdr_slack_channel_and_hours() -> None:
+    sdr = _user(
+        role="sdr",
+        email="sdr@example.com",
+        user_id="11111111-1111-1111-1111-111111111111",
+    )
+    supabase = SupabaseStub(
+        AuthStub(current_user=_user(role="sales_lead"), invited=sdr)
+    )
+    supabase.auth.admin.users = [sdr]
+    settings = FakeSdrSettingsRepository()
+    app = _app(supabase, settings=settings)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.patch(
+            f"/api/v1/users/sdrs/{sdr.id}",
+            headers={"Authorization": "Bearer jwt"},
+            json={
+                "slack_channel_id": "C0C04R07874",
+                "work_days": [1, 2, 3, 4, 5],
+                "work_start": "09:00:00",
+                "work_end": "18:00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == sdr.id
+    assert body["email"] == "sdr@example.com"
+    assert body["settings"]["slack_channel_id"] == "C0C04R07874"
+    assert body["settings"]["timezone"] == "Europe/Skopje"
+    assert body["settings"]["work_start"] == "09:00:00"
+    assert body["settings"]["work_end"] == "18:00:00"
+    assert settings.rows[sdr.id]["slack_channel_id"] == "C0C04R07874"
+
+
+@pytest.mark.asyncio
+async def test_sdr_cannot_update_sdr_settings() -> None:
+    sdr = _user(role="sdr")
+    supabase = SupabaseStub(AuthStub(current_user=sdr, invited=sdr))
+    supabase.auth.admin.users = [sdr]
+    app = _app(supabase)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.patch(
+            f"/api/v1/users/sdrs/{sdr.id}",
+            headers={"Authorization": "Bearer jwt"},
+            json={"slack_channel_id": "C0C04R07874"},
+        )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_update_sdr_settings_rejects_unknown_user_and_invalid_channel() -> None:
+    sdr = _user(
+        role="sdr",
+        email="sdr@example.com",
+        user_id="11111111-1111-1111-1111-111111111111",
+    )
+    supabase = SupabaseStub(
+        AuthStub(current_user=_user(role="admin"), invited=sdr)
+    )
+    supabase.auth.admin.users = [sdr]
+    app = _app(supabase)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        missing = await client.patch(
+            "/api/v1/users/sdrs/22222222-2222-2222-2222-222222222222",
+            headers={"Authorization": "Bearer jwt"},
+            json={"work_days": [1, 2, 3, 4, 5]},
+        )
+        invalid = await client.patch(
+            f"/api/v1/users/sdrs/{sdr.id}",
+            headers={"Authorization": "Bearer jwt"},
+            json={"slack_channel_id": "not-a-channel"},
+        )
+
+    assert missing.status_code == 422
+    assert invalid.status_code == 422
