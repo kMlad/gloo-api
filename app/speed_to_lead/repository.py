@@ -118,7 +118,12 @@ class SpeedToLeadRepository:
         include_handled: bool = False,
         visible_to_sdr_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Return events newest first with the embedded lead row under ``lead``."""
+        """Return events newest first with the embedded lead row under ``lead``.
+
+        Unhandled is the SDR workflow status ``new``, regardless of phone
+        availability or enrichment progress. Keep these filters on the inner
+        join so visibility, counts, and pagination use the same lead rows.
+        """
         query = self._db.table("speed_to_lead_events").select(
             "*,leads!inner(*)", count="exact"
         )

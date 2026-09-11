@@ -35,6 +35,7 @@ class LeadRepositoryStub:
         self.existing_emails: set[str] = set()
         self.existing_phones: set[str] = set()
         self.inserted_leads: list[dict] = []
+        self.location_queries: list[dict] = []
 
     async def list_leads(
         self,
@@ -50,6 +51,7 @@ class LeadRepositoryStub:
         assignment_status=None,
         assigned_sdr_id=None,
         visible_to_sdr_id=None,
+        locations=None,
     ):
         reply_type = reply_types[0] if reply_types else None
         self.reply_types.append(reply_type)
@@ -63,6 +65,7 @@ class LeadRepositoryStub:
                 "assignment_status": assignment_status,
                 "assigned_sdr_id": assigned_sdr_id,
                 "visible_to_sdr_id": visible_to_sdr_id,
+                "locations": locations,
             }
         )
         return (
@@ -88,6 +91,30 @@ class LeadRepositoryStub:
                 }
             ],
             1,
+        )
+
+    async def list_lead_locations(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        query: str | None = None,
+        visible_to_sdr_id: str | None = None,
+    ):
+        self.location_queries.append(
+            {
+                "query": query,
+                "limit": limit,
+                "offset": offset,
+                "visible_to_sdr_id": visible_to_sdr_id,
+            }
+        )
+        return (
+            [
+                {"location": "Delaware, United States", "lead_count": 2},
+                {"location": "United States", "lead_count": 4},
+            ],
+            2,
         )
 
     async def get_lead_detail(
@@ -676,6 +703,7 @@ async def test_sales_lead_filters_and_assigns_exact_unassigned_leads() -> None:
         "assignment_status": "unassigned",
         "assigned_sdr_id": None,
         "visible_to_sdr_id": None,
+        "locations": None,
     }
     assert assigned.status_code == 200
     assert assigned.json() == {
@@ -1290,3 +1318,71 @@ async def test_lead_list_filters_by_platform() -> None:
     assert mismatched_heyreach.status_code == 422
     assert repository.list_scopes[0]["platform"] == "smartlead"
     assert repository.list_scopes[1]["platform"] == "heyreach"
+
+
+@pytest.mark.asyncio
+async def test_lead_list_filters_by_location_substrings() -> None:
+    repository = LeadRepositoryStub()
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=_user(role="sales_lead"))
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        filtered = await client.get(
+            "/api/v1/leads?locations=United%20States&locations=Delaware,%20United%20States",
+            headers=headers,
+        )
+        singular = await client.get(
+            "/api/v1/leads?location=United%20States",
+            headers=headers,
+        )
+        options = await client.get(
+            "/api/v1/leads/locations?q=United%20States",
+            headers=headers,
+        )
+
+    assert filtered.status_code == 200
+    assert singular.status_code == 200
+    assert options.status_code == 200
+    assert repository.list_scopes[0]["locations"] == [
+        "United States",
+        "Delaware, United States",
+    ]
+    assert repository.list_scopes[1]["locations"] == ["United States"]
+    assert options.json()["items"] == [
+        {"location": "Delaware, United States", "lead_count": 2},
+        {"location": "United States", "lead_count": 4},
+    ]
+    assert repository.location_queries[0]["query"] == "United States"
+    assert repository.location_queries[0]["visible_to_sdr_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_sdr_location_options_are_owner_scoped() -> None:
+    sdr_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    repository = LeadRepositoryStub()
+    app = create_app(use_lifespan=False)
+    app.dependency_overrides[get_env] = _env
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_smartlead_client] = lambda: SmartLeadCampaignStub()
+    app.dependency_overrides[get_supabase] = lambda: SupabaseStub(
+        AuthStub(current_user=_user(role="sdr", user_id=sdr_id))
+    )
+    headers = {"Authorization": "Bearer user-jwt"}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        options = await client.get("/api/v1/leads/locations", headers=headers)
+
+    assert options.status_code == 200
+    assert repository.location_queries[0]["visible_to_sdr_id"] == sdr_id

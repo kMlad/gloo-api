@@ -512,3 +512,25 @@ def test_heyreach_speed_to_lead_migration_is_constrained() -> None:
     assert "to anon" not in migration
     assert "to authenticated" not in migration
     assert "drop column" not in migration
+
+
+def test_lead_location_filter_migration_indexes_and_searches_substrings() -> None:
+    migration = next(
+        Path("supabase/migrations").glob("*_lead_location_filter.sql")
+    ).read_text()
+
+    assert "create extension if not exists pg_trgm" in migration
+    assert "create index leads_location_idx" in migration
+    assert "create index leads_location_trgm_idx" in migration
+    assert "create or replace function public.list_lead_locations" in migration
+    assert "location ilike" in migration
+    assert "security invoker" in migration
+    assert (
+        "revoke execute on function public.list_lead_locations(text, uuid, integer, integer)\n"
+        "    from public, anon, authenticated"
+    ) in migration
+    assert (
+        "grant execute on function public.list_lead_locations(text, uuid, integer, integer)\n"
+        "    to service_role"
+    ) in migration
+    assert "drop column" not in migration

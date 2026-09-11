@@ -1169,3 +1169,55 @@ async def test_run_already_finished_at_start_is_summarised_immediately() -> None
     assert len(slack.messages) == 2
     assert slack.messages[1]["thread_ts"] == "1.0"
     assert slack.messages[1]["text"] == "Phone already on file; enrichment skipped."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_status", "phone"),
+    [
+        (None, None),
+        ("queued", None),
+        ("running", None),
+        ("waiting", None),
+        ("succeeded", "+442079460958"),
+        ("succeeded", None),
+        ("partial", "+442079460958"),
+        ("failed", None),
+    ],
+)
+async def test_unhandled_queue_retains_replies_regardless_of_enrichment(
+    run_status, phone, monkeypatch
+) -> None:
+    repository = FakeSpeedToLeadRepository(_campaign())
+    lead_id = str(uuid4())
+    repository.leads_by_id[lead_id] = {
+        "id": lead_id,
+        "status": "new",
+        "enriched_phone_number": phone,
+    }
+    event = await repository.insert_event({
+        "lead_id": lead_id,
+        "smartlead_campaign_id": CAMPAIGN_ID,
+        "replied_at": "2026-09-07T10:00:00Z",
+        "dedupe_key": "enrichment-independent-queue",
+    })
+    run_id = str(uuid4()) if run_status else None
+    await repository.update_event(event["id"], {"enrichment_run_id": run_id})
+
+    async def get_runs(run_ids):
+        return {run_id: {"id": run_id, "status": run_status}} if run_id else {}
+
+    monkeypatch.setattr(repository, "get_enrichment_runs", get_runs)
+    service, _, _, _ = _service(repository)
+
+    items, total = await service.list_events(limit=10, offset=0)
+
+    assert total == 1
+    assert len(items) == 1
+    assert items[0]["id"] == event["id"]
+    assert items[0]["lead"]["status"] == "new"
+    assert items[0]["lead"]["enriched_phone_number"] == phone
+    assert items[0]["enrichment"] == (
+        {"id": run_id, "status": run_status} if run_id else None
+    )
+    assert repository.list_calls[0]["include_handled"] is False

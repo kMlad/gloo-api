@@ -158,9 +158,15 @@ so a creation-date cutoff is not sufficient to repair an older reply batch.
 List imported leads with `GET /api/v1/leads` (user access token). Filters include
 `platform` (`smartlead` or `heyreach`), `campaign_id` (SmartLead),
 `heyreach_campaign_id`, `import_run_id`, `status`, singular `reply_type`, and
-repeated `reply_types`. `campaign_id` and `heyreach_campaign_id` cannot be
-combined, and `platform` cannot be paired with the other platform's campaign
-filter. Every list item includes
+repeated `reply_types`. Repeated `locations` (or singular `location`) keep leads
+whose location contains any selected value, case-insensitively, so
+`locations=United States` includes both `United States` and
+`Delaware, United States`. Populate the checkbox picker with
+`GET /api/v1/leads/locations?q=United%20States`; that search uses the same
+substring match and returns distinct stored values plus lead counts. SDRs only
+see locations on leads assigned to them. `campaign_id` and
+`heyreach_campaign_id` cannot be combined, and `platform` cannot be paired with
+the other platform's campaign filter. Every list item includes
 `source_campaigns` so the UI can show where and why the lead qualified.
 Retrieve complete canonical, campaign-specific, custom-property, and full
 chat history (inbound and outbound) with `GET /api/v1/leads/{lead_id}`. Cached
@@ -359,8 +365,13 @@ enrichment run status when one was started. `platform` tells SmartLead and
 HeyReach events apart; HeyReach events carry `heyreach_campaign_id`, no
 `category_id`, and the Auto-Tag label in `category_name`. By default only events whose lead
 status is still `new` are returned, so changing the lead status in the drawer
-clears the item; pass `include_handled=true` to see everything. SDRs only see
-events for leads assigned to them.
+clears the item; pass `include_handled=true` to see everything.
+
+Phone enrichment never marks a reply as handled: leads with and without an
+enriched phone remain in the queue while their status is `new`. Only changing
+the dashboard status away from `new` handles the lead; setting it back to `new`
+returns it to the queue. New replies preserve existing lead statuses.
+SDRs only see events for leads assigned to them.
 
 ## User invites
 

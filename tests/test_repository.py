@@ -4,7 +4,11 @@ import pytest
 
 from app.heyreach.repository import HeyReachRepository
 from app.phone_enrichment.repository import EnrichmentRepository
-from app.repositories import Repository
+from app.repositories import (
+    Repository,
+    location_contains_filter,
+    normalize_locations,
+)
 from app.tables.repository import _ROW_LIST_CHUNK, TableRepository
 
 
@@ -38,6 +42,12 @@ class QueryStub:
 
     def is_(self, *args, **kwargs):
         return self._record("is", *args, **kwargs)
+
+    def or_(self, *args, **kwargs):
+        return self._record("or", *args, **kwargs)
+
+    def ilike(self, *args, **kwargs):
+        return self._record("ilike", *args, **kwargs)
 
     def filter(self, *args, **kwargs):
         return self._record("filter", *args, **kwargs)
@@ -386,6 +396,91 @@ async def test_sdr_lead_list_is_scoped_before_pagination() -> None:
         index for index, call in enumerate(database.calls) if call[1] == "range"
     )
     assert owner_filter_index < range_index
+
+
+def test_location_filters_are_trimmed_and_or_matched_as_substrings() -> None:
+    assert normalize_locations([" United States ", "", "United States"]) == [
+        "United States"
+    ]
+    assert normalize_locations(["  "]) is None
+    assert normalize_locations(None) is None
+    assert location_contains_filter(
+        ["United States", "Delaware, United States"]
+    ) == (
+        'location.ilike."*United States*",'
+        'location.ilike."*Delaware, United States*"'
+    )
+
+
+@pytest.mark.asyncio
+async def test_lead_location_filter_precedes_pagination() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[], count=0)]})
+
+    items, total = await Repository(database).list_leads(
+        limit=50,
+        offset=0,
+        locations=[" United States ", "Delaware, United States", "United States"],
+    )
+
+    assert items == []
+    assert total == 0
+    lead_calls = [call for call in database.calls if call[0] == "leads"]
+    location_filter_index = next(
+        index
+        for index, call in enumerate(lead_calls)
+        if call[1] == "or"
+        and call[2]
+        == (
+            (
+                'location.ilike."*United States*",'
+                'location.ilike."*Delaware, United States*"'
+            ),
+        )
+    )
+    range_index = next(
+        index for index, call in enumerate(lead_calls) if call[1] == "range"
+    )
+    assert location_filter_index < range_index
+
+
+@pytest.mark.asyncio
+async def test_lead_location_options_search_is_scoped_and_paginated() -> None:
+    database = DatabaseStub(
+        {
+            "list_lead_locations": [
+                SimpleNamespace(
+                    data={
+                        "items": [
+                            {"location": "Delaware, United States", "lead_count": 2},
+                            {"location": "United States", "lead_count": 4},
+                        ],
+                        "total": 2,
+                    }
+                )
+            ]
+        }
+    )
+
+    items, total = await Repository(database).list_lead_locations(
+        limit=25,
+        offset=0,
+        query="  United States  ",
+        visible_to_sdr_id="sdr-1",
+    )
+
+    assert total == 2
+    assert [item["location"] for item in items] == [
+        "Delaware, United States",
+        "United States",
+    ]
+    assert ("list_lead_locations", "rpc", (
+        {
+            "p_query": "United States",
+            "p_assigned_sdr_id": "sdr-1",
+            "p_limit": 25,
+            "p_offset": 0,
+        },
+    ), {}) in database.calls
 
 
 @pytest.mark.asyncio
@@ -766,7 +861,8 @@ async def test_campaign_import_stats_return_latest_run_per_reply_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_speed_to_lead_list_events_filters_on_lead_status_and_owner() -> None:
+@pytest.mark.parametrize("phone", [None, "+442079460958"])
+async def test_speed_to_lead_list_events_filters_on_lead_status_and_owner(phone) -> None:
     from app.speed_to_lead.repository import SpeedToLeadRepository
 
     database = DatabaseStub(
@@ -777,7 +873,7 @@ async def test_speed_to_lead_list_events_filters_on_lead_status_and_owner() -> N
                         {
                             "id": "event-1",
                             "lead_id": "lead-1",
-                            "leads": {"id": "lead-1", "status": "new"},
+                            "leads": {"id": "lead-1", "status": "new", "enriched_phone_number": phone},
                         }
                     ],
                     count=7,
@@ -791,7 +887,7 @@ async def test_speed_to_lead_list_events_filters_on_lead_status_and_owner() -> N
     )
 
     assert total == 7
-    assert events[0]["lead"] == {"id": "lead-1", "status": "new"}
+    assert events[0]["lead"] == {"id": "lead-1", "status": "new", "enriched_phone_number": phone}
     assert "leads" not in events[0]
     assert database.calls[0][1:] == (
         "select",
@@ -831,3 +927,20 @@ async def test_speed_to_lead_list_events_can_include_handled() -> None:
     assert not any(
         call[1] == "eq" and call[2][0] == "leads.status" for call in database.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_phone_enrichment_does_not_change_sdr_workflow_status() -> None:
+    database = DatabaseStub({"leads": [SimpleNamespace(data=[{"id": "lead-1"}])]})
+
+    updated = await EnrichmentRepository(database).update_empty_lead_phone(
+        "lead-1", "+442079460958", "leadmagic"
+    )
+
+    assert updated is True
+    writes = [call for call in database.calls if call[1] == "update"]
+    assert len(writes) == 1
+    values = writes[0][2][0]
+    assert values["enriched_phone_number"] == "+442079460958"
+    assert "status" not in values
+    assert {call[0] for call in database.calls} == {"leads"}

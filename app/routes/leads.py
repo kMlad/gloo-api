@@ -44,12 +44,13 @@ from app.models import (
     LeadCsvPreviewResponse,
     LeadDetailResponse,
     LeadListResponse,
+    LeadLocationListResponse,
     LeadPlatform,
     LeadStatus,
     LeadUpdate,
     ReplyType,
 )
-from app.repositories import Repository
+from app.repositories import MAX_LOCATION_FILTERS, Repository, normalize_locations
 from app.services import LeadService
 from app.smartlead.client import SmartLeadClient
 from app.supabase_client import get_supabase
@@ -90,6 +91,8 @@ async def list_leads(
     import_run_id: UUID | None = Query(default=None),
     assignment_status: AssignmentStatus | None = Query(default=None),
     assigned_sdr_id: UUID | None = Query(default=None),
+    location: str | None = Query(default=None, max_length=200),
+    locations: list[str] | None = Query(default=None, max_length=200),
 ) -> dict:
     if assignment_status == "unassigned" and assigned_sdr_id is not None:
         raise HTTPException(
@@ -114,6 +117,17 @@ async def list_leads(
     selected_reply_types = list(reply_types or [])
     if reply_type is not None and reply_type not in selected_reply_types:
         selected_reply_types.append(reply_type)
+    selected_locations = normalize_locations(
+        [*(locations or []), *([location] if location is not None else [])]
+    )
+    if (
+        selected_locations is not None
+        and len(selected_locations) > MAX_LOCATION_FILTERS
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"locations may contain at most {MAX_LOCATION_FILTERS} values",
+        )
     items, total = await repository.list_leads(
         limit=limit,
         offset=offset,
@@ -127,6 +141,24 @@ async def list_leads(
         assigned_sdr_id=(
             str(assigned_sdr_id) if assigned_sdr_id is not None else None
         ),
+        visible_to_sdr_id=actor.id if actor.role == "sdr" else None,
+        locations=selected_locations,
+    )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/locations", response_model=LeadLocationListResponse)
+async def list_lead_locations(
+    repository: RepositoryDependency,
+    actor: LeadUserDependency,
+    q: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    items, total = await repository.list_lead_locations(
+        query=q,
+        limit=limit,
+        offset=offset,
         visible_to_sdr_id=actor.id if actor.role == "sdr" else None,
     )
     return {"items": items, "total": total, "limit": limit, "offset": offset}

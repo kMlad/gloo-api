@@ -7,6 +7,35 @@ from app.utils import chunks, merge_non_empty, parse_datetime, to_iso, utc_now
 from supabase import AsyncClient
 
 _LEAD_INSERT_CHUNK = 100
+MAX_LOCATION_FILTERS = 100
+
+
+def normalize_locations(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in values:
+        location = value.strip()
+        if not location or location in seen:
+            continue
+        seen.add(location)
+        normalized.append(location)
+    return normalized or None
+
+
+def location_contains_filter(locations: list[str]) -> str:
+    clauses: list[str] = []
+    for location in locations:
+        escaped = (
+            location.replace("\\", "\\\\")
+            .replace('"', '""')
+            .replace("*", "\\*")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        clauses.append(f'location.ilike."*{escaped}*"')
+    return ",".join(clauses)
 
 
 class ConcurrentImportError(Exception):
@@ -667,9 +696,11 @@ class Repository:
         assignment_status: str | None = None,
         assigned_sdr_id: str | None = None,
         visible_to_sdr_id: str | None = None,
+        locations: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         if reply_type is not None:
             reply_types = list(dict.fromkeys([*(reply_types or []), reply_type]))
+        locations = normalize_locations(locations)
         join_smartlead = (
             platform == "smartlead"
             or campaign_id is not None
@@ -710,6 +741,8 @@ class Repository:
             query = query.is_("assigned_sdr_id", "null")
         elif assignment_status == "assigned":
             query = query.filter("assigned_sdr_id", "not.is", "null")
+        if locations is not None:
+            query = query.or_(location_contains_filter(locations))
         response = await (
             query.order("source_observed_at", desc=True)
             .order("id")
@@ -725,6 +758,34 @@ class Repository:
 
         await self.decorate_leads(leads)
         return leads, response.count or len(leads)
+
+    async def list_lead_locations(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        query: str | None = None,
+        visible_to_sdr_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        needle = query.strip() if query else ""
+        response = await self._db.rpc(
+            "list_lead_locations",
+            {
+                "p_query": needle or None,
+                "p_assigned_sdr_id": visible_to_sdr_id,
+                "p_limit": limit,
+                "p_offset": offset,
+            },
+        ).execute()
+        payload = response.data
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if not isinstance(payload, dict):
+            return [], 0
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            items = []
+        return items, int(payload.get("total") or 0)
 
     async def decorate_leads(self, leads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Attach conversation counts, latest reply, sources, and speed-to-lead time."""

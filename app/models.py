@@ -305,6 +305,18 @@ class LeadListResponse(BaseModel):
     offset: int
 
 
+class LeadLocationOption(BaseModel):
+    location: str
+    lead_count: int
+
+
+class LeadLocationListResponse(BaseModel):
+    items: list[LeadLocationOption]
+    total: int
+    limit: int
+    offset: int
+
+
 class LeadDetailResponse(BaseModel):
     lead: dict[str, Any]
     conversations: list[dict[str, Any]]
